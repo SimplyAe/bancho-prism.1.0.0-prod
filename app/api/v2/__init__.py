@@ -3,6 +3,7 @@
 from fastapi import APIRouter
 
 from . import accounts
+from . import activity
 from . import anticheat
 from . import clans
 from . import leaderboards
@@ -15,6 +16,7 @@ from . import sessions
 apiv2_router = APIRouter(tags=["API v2"], prefix="/v2")
 
 apiv2_router.include_router(accounts.router)
+apiv2_router.include_router(activity.router)
 apiv2_router.include_router(anticheat.router)
 apiv2_router.include_router(clans.router)
 apiv2_router.include_router(leaderboards.router)
