@@ -1,0 +1,111 @@
+services:
+  ## shared services
+
+  mysql:
+    image: mysql:9.7.1
+    # a crashed container must come back without human intervention.
+    # `unless-stopped` (not `always`) so a deliberate stop stays stopped.
+    restart: unless-stopped
+    # ports:
+    #   - ${DB_PORT}:${DB_PORT}
+    environment:
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASS}
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_HOST: ${DB_HOST}
+      MYSQL_TCP_PORT: ${DB_PORT}
+      MYSQL_RANDOM_ROOT_PASSWORD: "true"
+    volumes:
+      - ./migrations/base.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      # binary logging for point-in-time recovery; see scripts/backup.sh.
+      - ./ext/mysql/pitr.cnf:/etc/mysql/conf.d/pitr.cnf:ro
+      - db-data:/var/lib/mysql
+    healthcheck:
+      test: '/usr/bin/mysql --user=$$MYSQL_USER --password=$$MYSQL_PASSWORD --execute "SHOW DATABASES;"'
+      interval: 2s
+      timeout: 20s
+      retries: 10
+
+  redis:
+    image: redis:8.8.0
+    restart: unless-stopped
+    # ports:
+    #   - ${REDIS_PORT}:${REDIS_PORT}
+    user: root
+    env_file:
+      - .env
+    volumes:
+      - redis-data:/data
+    command:
+      - sh
+      - -c
+      - |
+        if [ -n "$${REDIS_PASS}" ]; then
+          redis-server --requirepass "$${REDIS_PASS}" --appendonly yes --appendfsync everysec
+        else
+          redis-server --appendonly yes --appendfsync everysec
+        fi
+
+  ## application services
+
+  bancho:
+    # we also have a public image: ghcr.io/osuakatsuki/bancho.py:latest
+    image: bancho:latest
+    restart: unless-stopped
+    ports:
+      - ${APP_PORT}:${APP_PORT}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    tty: true
+    init: true
+    env_file:
+      - .env
+    volumes:
+      - .:/srv/root
+      - data:/srv/root/.data
+    # NOTE: `depends_on` only orders *startup*. It does nothing if a
+    # dependency restarts later, so the app reconnects on its own.
+    # This healthcheck catches hangs (e.g. a wedged event loop), which
+    # a restart policy alone cannot detect -- the process is still alive.
+    healthcheck:
+      test: ["CMD", "python", "scripts/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # generous, since first boot runs migrations before serving.
+      start_period: 60s
+
+  # the anticheat replay-analysis worker: same image, its own process, so
+  # CPU-bound replay analysis (LZMA + geometry over thousands of frames)
+  # never contends with latency-sensitive score submission in the web
+  # process. It coordinates with `bancho` purely through the shared MySQL
+  # `score_replay_stats` table and the Redis queue -- never in-process --
+  # so it can be scaled, restarted, or run several-up independently.
+  bancho-worker:
+    image: bancho:latest
+    restart: unless-stopped
+    # NOTE: no ports and no healthcheck endpoint -- the worker serves no
+    # HTTP. Its liveness shows up as the `replay-analysis-*` supervised-loop
+    # metrics scraped from the `bancho` process's shared registry, and a
+    # crash is handled by the restart policy.
+    entrypoint: ["python", "-m", "app.anticheat_worker"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    tty: true
+    init: true
+    env_file:
+      - .env
+    volumes:
+      - .:/srv/root
+      - data:/srv/root/.data
+
+volumes:
+  data:
+  db-data:
+  redis-data:

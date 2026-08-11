@@ -1,0 +1,26 @@
+# Point-in-time-recovery settings for the bancho.py MySQL instance.
+#
+# The realistic disaster here is not hardware -- it is a bad admin action: a
+# mistaken `DELETE`, a wrong migration, a fat-fingered mass-restrict. A nightly
+# logical dump alone loses everything since the last dump. Binary logging closes
+# that gap: `scripts/backup.sh` archives the binlogs, and a recovery can replay
+# them from the last dump up to the instant *before* the mistake.
+#
+# The official mysql image `!includedir`s /etc/mysql/conf.d, so mounting this
+# file there is enough -- no entrypoint override, no command rewrite.
+#
+# Most of these are already the 8.0+ defaults; we pin them so a version bump or
+# an image change can never silently turn PITR off.
+[mysqld]
+# enable the binary log (the PITR journal). `binlog` is the base name.
+log_bin = binlog
+server_id = 1
+# ROW format records the actual rows changed, so replay is deterministic
+# regardless of nondeterministic statements (NOW(), triggers, etc.).
+binlog_format = ROW
+# fsync each transaction's binlog entry at commit -- a crash loses no
+# acknowledged write. Paired with the default innodb_flush_log_at_trx_commit=1.
+sync_binlog = 1
+# keep a week of binlogs on-box. The daily archive job only needs them to
+# survive until it runs; this is the safety margin if the job is skipped.
+binlog_expire_logs_seconds = 604800

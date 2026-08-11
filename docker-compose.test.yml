@@ -1,0 +1,74 @@
+services:
+  ## shared services
+
+  mysql-test:
+    image: mysql:9.7.1
+    # ports:
+    #   - ${DB_PORT}:${DB_PORT}
+    environment:
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASS}
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_HOST: ${DB_HOST}
+      MYSQL_TCP_PORT: ${DB_PORT}
+      MYSQL_ROOT_PASSWORD: ${DB_PASS}
+    volumes:
+      - ./migrations/base.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - test-db-data:/var/lib/mysql
+    networks:
+      - test-network
+    healthcheck:
+      test: "/usr/bin/mysql --user=$$MYSQL_USER --password=$$MYSQL_PASSWORD --execute \"SHOW DATABASES;\""
+      interval: 2s
+      timeout: 20s
+      retries: 10
+
+  redis-test:
+    image: redis:8.8.0
+    # ports:
+    #   - ${REDIS_PORT}:${REDIS_PORT}
+    user: root
+    env_file:
+      - .env.test
+    volumes:
+      - test-redis-data:/data
+    networks:
+      - test-network
+    command:
+      - sh
+      - -c
+      - |
+        if [ -n "$${REDIS_PASS}" ]; then
+          redis-server --requirepass "$${REDIS_PASS}"
+        else
+          redis-server
+        fi
+
+  ## application services
+
+  bancho-test:
+    # we also have a public image: ghcr.io/osuakatsuki/bancho.py:latest
+    image: bancho:latest
+    depends_on:
+      mysql-test:
+        condition: service_healthy
+      redis-test:
+        condition: service_started
+    tty: true
+    init: true
+    env_file:
+      - .env.test
+    volumes:
+      - .:/srv/root
+      - ./logging.yaml.example:/srv/root/logging.yaml:ro
+      - test-data:/srv/root/.data
+    networks:
+      - test-network
+
+volumes:
+  test-data:
+  test-db-data:
+  test-redis-data:
+
+networks:
+  test-network:

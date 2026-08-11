@@ -1,0 +1,53 @@
+name: Test Application Code
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - "**.py"
+      - "**.sh"
+      - "**.yml"
+      - "**.toml"
+      - "**.lock"
+      - "**.sql"
+      - "Dockerfile"
+  pull_request:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  run-test-suite:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Build application image
+        run: docker build -t bancho:latest .
+
+      - name: Start containers
+        run: docker compose --env-file .env.test -f docker-compose.test.yml up --detach --wait --wait-timeout 30 bancho-test mysql-test redis-test
+
+      - name: Run tests
+        run: docker compose --env-file .env.test -f docker-compose.test.yml exec -T bancho-test /srv/root/scripts/run-tests.sh
+
+      - name: Stop containers
+        if: always()
+        run: docker compose --env-file .env.test -f docker-compose.test.yml down --volumes --remove-orphans
+
+      - name: Archive code coverage results
+        uses: actions/upload-artifact@v7
+        with:
+          name: code-coverage-report
+          path: coverage/
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
+        with:
+          disable_search: true
+          fail_ci_if_error: false
+          files: coverage/coverage.xml
+          use_oidc: true
