@@ -1,3 +1,13 @@
+# bancho-prism
+
+**bancho-prism** `1.0.0-prod` — a hard fork of [bancho.py](https://github.com/osuAkatsuki/bancho.py)
+taken in its own direction (reliability & recovery, replay-based anticheat with a
+staff review queue, a historical data foundation, and social features), with no
+upstream rebase. It builds on the excellent foundation below; the original
+bancho.py documentation follows.
+
+---
+
 # bancho.py
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
