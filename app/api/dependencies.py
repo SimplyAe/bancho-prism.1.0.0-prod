@@ -77,6 +77,7 @@ from app.services.score_leaderboards import ScoreLeaderboardsService
 from app.services.score_submission import ScoreSubmissionService
 from app.services.scores import ScoresService
 from app.services.screenshots import ScreenshotService
+from app.services.social.activity_feed import ActivityFeedService
 from app.services.stat_snapshots import StatSnapshotService
 from app.services.tourney_pools import TourneyPoolsService
 from app.services.web_sessions import WebSessionsService
@@ -649,3 +650,19 @@ def get_anticheat_review_service(
     logs: Annotated[LogsRepository, Depends(get_logs_repository)],
 ) -> AnticheatReviewService:
     return AnticheatReviewService(flags=anticheat_flags, logs=logs)
+
+
+def get_activity_feed_service(
+    activity_events: Annotated[
+        ActivityEventsRepository,
+        Depends(get_activity_events_repository),
+    ],
+    relationships: Annotated[
+        RelationshipsRepository,
+        Depends(get_relationships_repository),
+    ],
+) -> ActivityFeedService:
+    return ActivityFeedService(
+        events=activity_events,
+        relationships=relationships,
+    )
