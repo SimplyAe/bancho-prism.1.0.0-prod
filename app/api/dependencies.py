@@ -75,9 +75,11 @@ from app.services.relationships import RelationshipsService
 from app.services.replays import ReplayService
 from app.services.score_leaderboards import ScoreLeaderboardsService
 from app.services.score_submission import ScoreSubmissionService
+from app.services.score_submission import SubmittedScore
 from app.services.scores import ScoresService
 from app.services.screenshots import ScreenshotService
 from app.services.social.activity_feed import ActivityFeedService
+from app.services.social.activity_producers import publish_score_submission_activity
 from app.services.stat_snapshots import StatSnapshotService
 from app.services.tourney_pools import TourneyPoolsService
 from app.services.web_sessions import WebSessionsService
@@ -144,6 +146,25 @@ def _schedule_replay_analysis(score_id: int, mode: int) -> None:
     _ = spawn_background_task(
         queue.enqueue(score_id, mode),
         name="enqueue-replay-analysis",
+    )
+
+
+def _publish_activity_events(submitted: SubmittedScore) -> None:
+    """Fire-and-forget publish of a finished submission to the activity feed.
+
+    Like ``_schedule_replay_analysis``, this runs off the latency-sensitive
+    submission path as a supervised background task. The feed is a convenience
+    log, not a source of truth, so a dropped publish (redis/mysql blip, process
+    killed) is harmless -- the durable ``scores``/``stats`` rows are unaffected,
+    and the producer itself swallows and logs its own errors.
+    """
+    feed_service = ActivityFeedService(
+        events=get_activity_events_repository(),
+        relationships=get_relationships_repository(),
+    )
+    _ = spawn_background_task(
+        publish_score_submission_activity(feed_service, submitted),
+        name="publish-activity-events",
     )
 
 
@@ -581,6 +602,7 @@ def get_score_submission_service(
         increment_metric=_increment_metric,
         record_submission_integrity_failure=_record_strange_occurrence_stacktrace,
         schedule_replay_analysis=_schedule_replay_analysis,
+        publish_activity_events=_publish_activity_events,
     )
 
 

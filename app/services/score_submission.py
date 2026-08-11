@@ -846,6 +846,17 @@ def _no_replay_analysis(score_id: int, mode: int) -> None:
     return None
 
 
+def _no_activity_publish(submitted: "SubmittedScore") -> None:
+    """Default ``publish_activity_events``: publish nothing.
+
+    Keeps the activity feed an opt-in dependency of score submission -- a
+    deployment that has not wired the feed submits scores exactly as before.
+    The wired implementation (see ``app.api.dependencies``) spawns a supervised
+    background task, so a feed write never runs on this latency-sensitive path.
+    """
+    return None
+
+
 @dataclass(frozen=True)
 class ScoreSubmissionService:
     replays_path: Path
@@ -870,6 +881,10 @@ class ScoreSubmissionService:
     # analysis, by (score_id, mode). Defaults to a no-op so the submission path
     # never hard-depends on the analysis queue being wired.
     schedule_replay_analysis: Callable[[int, int], None] = _no_replay_analysis
+    # fire-and-forget publish of the finished submission to the activity feed.
+    # Defaults to a no-op so submission never hard-depends on the feed; the wired
+    # implementation spawns a supervised task so no feed write is awaited here.
+    publish_activity_events: Callable[[SubmittedScore], None] = _no_activity_publish
 
     async def persist_score_submission_stats(
         self,
@@ -1148,13 +1163,21 @@ class ScoreSubmissionService:
             Ansi.LGREEN,
         )
 
-        return SubmittedScore(
+        submitted = SubmittedScore(
             score=score,
             score_id=persistence_result.score_id,
             previous_stats=persistence_result.previous_stats,
             current_stats=persistence_result.current_stats,
             unlocked_achievements=persistence_result.unlocked_achievements,
         )
+
+        # publish feed events off the hot path. The wired hook spawns a
+        # supervised background task, so a slow or failing feed write is logged
+        # and dropped -- never awaited on this latency-sensitive path, and never
+        # able to affect the already-committed score.
+        self.publish_activity_events(submitted)
+
+        return submitted
 
     async def unlock_new_achievements(self, score: Score) -> list[Achievement]:
         assert score.player is not None
