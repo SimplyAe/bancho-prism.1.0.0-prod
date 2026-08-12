@@ -336,14 +336,24 @@ class MpMatchesRepository:
         *,
         before_id: int | None = None,
         limit: int = 50,
+        public_only: bool = False,
     ) -> list[MpMatch]:
         """Recent matches, newest first, keyset-paged by id.
 
         ``before_id`` scrolls backwards: pass the id of the oldest match already
         seen to get the next older page. Paging by ``id < before_id`` (not
         ``OFFSET``) keeps each page O(limit) as history grows.
+
+        ``public_only`` restricts the result to matches whose history is public,
+        for the browsable listing: applying the filter in the query (rather than
+        after paging) means a page is never silently short because private
+        lobbies were dropped from it, which would corrupt the keyset cursor.
         """
         select_stmt = select(*MATCH_READ_PARAMS)
+        if public_only:
+            select_stmt = select_stmt.where(
+                MpMatchesTable.has_public_history == True,
+            )
         if before_id is not None:
             select_stmt = select_stmt.where(MpMatchesTable.id < before_id)
 

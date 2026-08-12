@@ -175,7 +175,7 @@ def _where_predicates(whereclause: Any) -> list[Any]:
         column_name = clause.left.name
         operator = clause.operator.__name__
         if operator == "eq":
-            predicates.append(_eq(column_name, clause.right.value))
+            predicates.append(_eq(column_name, _clause_value(clause.right)))
         elif operator == "lt":
             predicates.append(_lt(column_name, clause.right.value))
         elif operator == "is_":  # `col.is_(None)` -> right is a Null node
@@ -183,6 +183,21 @@ def _where_predicates(whereclause: Any) -> list[Any]:
         else:  # pragma: no cover - the repository only uses the three above
             raise AssertionError(f"unhandled operator in fake: {operator}")
     return predicates
+
+
+def _clause_value(node: Any) -> Any:
+    """Pull the Python value out of a clause's right-hand side.
+
+    A bound literal (``col == 5``) carries it on ``.value``; ``col == True`` /
+    ``col == False`` compile to bare ``True_`` / ``False_`` SQL literals with no
+    ``.value``, so resolve those by node type.
+    """
+    type_name = type(node).__name__
+    if type_name == "True_":
+        return True
+    if type_name == "False_":
+        return False
+    return node.value
 
 
 def _eq(column_name: str, value: Any) -> Any:
@@ -317,6 +332,22 @@ async def test_fetch_recent_matches_pages_newest_first_by_id() -> None:
 
     older = await repository.fetch_recent_matches(before_id=newest[-1].id, limit=2)
     assert [m.name for m in older] == ["a"]
+
+
+async def test_fetch_recent_matches_public_only_hides_private_lobbies() -> None:
+    repository, _database = _repo()
+    await repository.create_match(name="pub1", host_id=3, has_public_history=True)
+    await repository.create_match(name="priv", host_id=3, has_public_history=False)
+    await repository.create_match(name="pub2", host_id=3, has_public_history=True)
+
+    # the browsable index asks for public matches only -> the private lobby is
+    # filtered in the query, so it never occupies a slot in the page.
+    public = await repository.fetch_recent_matches(public_only=True)
+    assert [m.name for m in public] == ["pub2", "pub1"]
+
+    # the default (unfiltered) read still returns everything, newest first.
+    everything = await repository.fetch_recent_matches()
+    assert [m.name for m in everything] == ["pub2", "priv", "pub1"]
 
 
 # --- games -----------------------------------------------------------------

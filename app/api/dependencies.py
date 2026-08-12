@@ -36,6 +36,7 @@ from app.repositories.leaderboard_ranks import LeaderboardRanksRepository
 from app.repositories.logs import LogsRepository
 from app.repositories.mail import MailRepository
 from app.repositories.maps import MapsRepository
+from app.repositories.mp_matches import MpMatchesRepository
 from app.repositories.ratings import RatingsRepository
 from app.repositories.relationships import RelationshipsRepository
 from app.repositories.replay_analysis_queue import ReplayAnalysisQueue
@@ -68,6 +69,7 @@ from app.services.maps import BeatmapInfoService
 from app.services.maps import BeatmapRatingService
 from app.services.maps import BeatmapSetService
 from app.services.maps import MapsService
+from app.services.multiplayer.match_history_reader import MatchHistoryService
 from app.services.performance import PerformanceService
 from app.services.player_leaderboards import PlayerLeaderboardsService
 from app.services.players import PlayersService
@@ -245,6 +247,10 @@ def get_stat_snapshots_repository() -> StatSnapshotsRepository:
 
 def get_maps_repository() -> MapsRepository:
     return MapsRepository(app.state.services.database)
+
+
+def get_mp_matches_repository() -> MpMatchesRepository:
+    return MpMatchesRepository(app.state.services.database)
 
 
 def get_ratings_repository() -> RatingsRepository:
@@ -688,3 +694,12 @@ def get_activity_feed_service(
         events=activity_events,
         relationships=relationships,
     )
+
+
+def get_match_history_service(
+    mp_matches: Annotated[
+        MpMatchesRepository,
+        Depends(get_mp_matches_repository),
+    ],
+) -> MatchHistoryService:
+    return MatchHistoryService(matches=mp_matches)

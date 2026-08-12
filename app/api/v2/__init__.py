@@ -8,6 +8,7 @@ from . import anticheat
 from . import clans
 from . import leaderboards
 from . import maps
+from . import matches
 from . import players
 from . import scores
 from . import server
@@ -21,6 +22,7 @@ apiv2_router.include_router(anticheat.router)
 apiv2_router.include_router(clans.router)
 apiv2_router.include_router(leaderboards.router)
 apiv2_router.include_router(maps.router)
+apiv2_router.include_router(matches.router)
 apiv2_router.include_router(players.router)
 apiv2_router.include_router(scores.router)
 apiv2_router.include_router(server.router)
