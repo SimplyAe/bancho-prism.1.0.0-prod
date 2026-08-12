@@ -32,6 +32,7 @@ from app.api.v2 import matches as matches_api
 from app.constants.privileges import Privileges
 from app.repositories.mp_matches import MpMatch
 from app.repositories.mp_matches import MpMatchGame
+from app.repositories.mp_matches import MpMatchGameScore
 from app.repositories.users import User
 
 _FIXED_TIME = datetime(2026, 8, 12, 12, 0, 0)
@@ -67,6 +68,29 @@ def _game(game_id: int, *, match_id: int = 5) -> MpMatchGame:
         participants=[4, 5],
         started_at=_FIXED_TIME,
         ended_at=_FIXED_TIME,
+    )
+
+
+def _score(user_id: int, *, placement: int, game_id: int = 8) -> MpMatchGameScore:
+    return MpMatchGameScore(
+        id=user_id,
+        game_id=game_id,
+        user_id=user_id,
+        team=0,
+        mods=0,
+        score=1_000_000 - placement,
+        max_combo=500,
+        num300=300,
+        num100=0,
+        num50=0,
+        num_geki=0,
+        num_katu=0,
+        num_miss=0,
+        acc=100.0,
+        perfect=True,
+        passed=True,
+        placement=placement,
+        created_at=_FIXED_TIME,
     )
 
 
@@ -113,6 +137,7 @@ class _FakeHistoryService:
         self.recent: list[MpMatch] = []
         self.match: MpMatch | None = None
         self.games: list[MpMatchGame] | None = []
+        self.scores: list[MpMatchGameScore] | None = []
         self.calls: list[SimpleNamespace] = []
 
     async def fetch_recent_matches(
@@ -168,6 +193,25 @@ class _FakeHistoryService:
         )
         return self.games
 
+    async def fetch_game_scores(
+        self,
+        match_id: int,
+        game_id: int,
+        *,
+        viewer_id: int | None = None,
+        viewer_is_staff: bool = False,
+    ) -> list[MpMatchGameScore] | None:
+        self.calls.append(
+            SimpleNamespace(
+                method="fetch_game_scores",
+                match_id=match_id,
+                game_id=game_id,
+                viewer_id=viewer_id,
+                viewer_is_staff=viewer_is_staff,
+            ),
+        )
+        return self.scores
+
 
 def _body(response: Any) -> dict[str, Any]:
     return orjson.loads(response.body)
@@ -206,6 +250,20 @@ async def _get_games(
         match_id,
         before_id=before_id,
         limit=limit,
+        actor=actor,
+        match_history_service=service,  # type: ignore[arg-type]
+    )
+
+
+async def _get_scores(
+    service: _FakeHistoryService,
+    match_id: int,
+    game_id: int,
+    actor: User | None,
+) -> Any:
+    return await matches_api.get_match_game_scores(
+        match_id,
+        game_id,
         actor=actor,
         match_history_service=service,  # type: ignore[arg-type]
     )
@@ -353,3 +411,66 @@ async def test_get_match_games_invisible_or_unknown_is_404() -> None:
 
     assert response.status_code == 404
     assert _body(response) == {"status": "error", "error": "Match not found."}
+
+
+# --- game scores: visibility gate threaded, 404 collapses ------------------
+
+
+async def test_get_match_game_scores_returns_a_scoreboard() -> None:
+    service = _FakeHistoryService()
+    service.scores = [_score(20, placement=1), _score(10, placement=2)]
+
+    response = await _get_scores(service, 5, 8, _PLAYER)
+
+    assert response.status_code == 200
+    body = _body(response)
+    # rendered in placement order, carrying the decoded per-player fields.
+    assert [(s["user_id"], s["placement"]) for s in body["data"]] == [(20, 1), (10, 2)]
+    assert body["data"][0]["acc"] == 100.0
+    assert body["data"][0]["passed"] is True
+
+
+async def test_get_match_game_scores_threads_ids_and_the_callers_identity() -> None:
+    service = _FakeHistoryService()
+    service.scores = [_score(20, placement=1)]
+
+    await _get_scores(service, 5, 8, _PLAYER)
+
+    # both the match id and the game id are threaded to the service, with the
+    # caller's own identity (a non-staff player is not treated as staff).
+    call = service.calls[0]
+    assert call.method == "fetch_game_scores"
+    assert (call.match_id, call.game_id) == (5, 8)
+    assert call.viewer_id == _PLAYER.id
+    assert call.viewer_is_staff is False
+
+
+async def test_get_match_game_scores_marks_staff_callers_as_staff() -> None:
+    service = _FakeHistoryService()
+    service.scores = [_score(20, placement=1)]
+
+    await _get_scores(service, 5, 8, _STAFF)
+
+    call = service.calls[0]
+    assert call.viewer_id == _STAFF.id
+    assert call.viewer_is_staff is True
+
+
+async def test_get_match_game_scores_empty_board_is_ok_not_404() -> None:
+    service = _FakeHistoryService()
+    service.scores = []  # visible game, no recorded scores
+
+    response = await _get_scores(service, 5, 8, _PLAYER)
+
+    assert response.status_code == 200
+    assert _body(response)["data"] == []
+
+
+async def test_get_match_game_scores_invisible_or_unknown_is_404() -> None:
+    service = _FakeHistoryService()
+    service.scores = None  # unknown match/game, private, or wrong-match pairing
+
+    response = await _get_scores(service, 5, 8, None)
+
+    assert response.status_code == 404
+    assert _body(response) == {"status": "error", "error": "Match game not found."}

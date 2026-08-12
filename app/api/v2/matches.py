@@ -11,6 +11,10 @@ those rows -- three query paths, none of which writes:
 - ``GET /matches/{match_id}`` -- one lobby's metadata (name, host, timestamps).
 - ``GET /matches/{match_id}/games`` -- the games played in one lobby, newest
   first.
+- ``GET /matches/{match_id}/games/{game_id}/scores`` -- one game's per-player
+  scoreboard, ordered by finishing placement. The game is confirmed to belong
+  to the match it is requested under, so a private game's scores cannot be read
+  by pairing its id with a public match.
 
 The two per-match paths honour the ``//private`` flag: a public lobby is
 readable by anyone, a private one only by its host or by staff. When a match is
@@ -42,6 +46,7 @@ from app.api.v2.common import responses
 from app.api.v2.common.responses import Failure
 from app.api.v2.common.responses import Success
 from app.api.v2.models.matches import MatchGameModel
+from app.api.v2.models.matches import MatchGameScoreModel
 from app.api.v2.models.matches import MatchModel
 from app.constants.privileges import Privileges
 from app.repositories.users import User
@@ -154,3 +159,38 @@ async def get_match_games(
 
     response = [MatchGameModel.model_validate(game) for game in games]
     return responses.success(content=response, meta=_page_meta(games, limit))
+
+
+@router.get("/matches/{match_id}/games/{game_id}/scores")
+async def get_match_game_scores(
+    match_id: int,
+    game_id: int,
+    *,
+    actor: Annotated[
+        User | None,
+        Depends(actors.get_optional_actor),
+    ],
+    match_history_service: Annotated[
+        MatchHistoryService,
+        Depends(api_dependencies.get_match_history_service),
+    ],
+) -> Success[list[MatchGameScoreModel]] | Failure:
+    scores = await match_history_service.fetch_game_scores(
+        match_id,
+        game_id,
+        viewer_id=actor.id if actor is not None else None,
+        viewer_is_staff=_is_staff(actor),
+    )
+    if scores is None:
+        # None means the game is not readable here -- an unknown match/game, a
+        # private match the caller may not see, or a game that belongs to some
+        # other match. All 404 identically, so pairing a game id with the wrong
+        # match discloses nothing. An empty scoreboard, by contrast, is a 200
+        # with [] -- a visible game that simply has no recorded scores.
+        return responses.failure(
+            message="Match game not found.",
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+
+    response = [MatchGameScoreModel.model_validate(score) for score in scores]
+    return responses.success(content=response)

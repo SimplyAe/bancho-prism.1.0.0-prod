@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from app.repositories.mp_matches import MpMatch
 from app.repositories.mp_matches import MpMatchesRepository
 from app.repositories.mp_matches import MpMatchGame
+from app.repositories.mp_matches import MpMatchGameScore
 
 
 def _is_visible_to(
@@ -130,3 +131,41 @@ class MatchHistoryService:
             before_id=before_id,
             limit=limit,
         )
+
+    async def fetch_game_scores(
+        self,
+        match_id: int,
+        game_id: int,
+        *,
+        viewer_id: int | None = None,
+        viewer_is_staff: bool = False,
+    ) -> list[MpMatchGameScore] | None:
+        """One game's per-player scoreboard, ordered by finishing placement.
+
+        Gated by the same visibility rule as the rest of the match: the caller
+        must be able to read the parent match (public, its host, or staff). The
+        game is then confirmed to actually belong to that match -- so a caller
+        cannot pair a private game's id with a public match they *can* see and
+        read a scoreboard they may not. A mismatch, an unknown game, and an
+        unreadable match all collapse to ``None`` (HTTP 404), disclosing
+        nothing about a game that is not theirs to see.
+
+        Returns ``[]`` for a game that belongs to a visible match but has no
+        recorded scores (an older game, or one where no participant sent a
+        usable frame) -- an empty scoreboard, distinct from a missing game.
+        """
+        match = await self.matches.fetch_match(match_id)
+        if match is None or not _is_visible_to(
+            match,
+            viewer_id=viewer_id,
+            viewer_is_staff=viewer_is_staff,
+        ):
+            return None
+
+        game = await self.matches.fetch_game(game_id)
+        if game is None or game.match_id != match_id:
+            # unknown game, or a real game but under a different match than the
+            # one it was requested through -- both are "not here", so 404.
+            return None
+
+        return await self.matches.fetch_scores_for_game(game_id)

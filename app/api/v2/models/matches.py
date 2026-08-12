@@ -53,3 +53,37 @@ class MatchGameModel(BaseModel):
     participants: list[int]
     started_at: datetime
     ended_at: datetime | None
+
+
+class MatchGameScoreModel(BaseModel):
+    """One participant's final result in a completed game, mirroring the
+    repository's :class:`app.repositories.mp_matches.MpMatchGameScore`.
+
+    The row is the snapshot decoded from that player's last score frame at
+    MATCH_COMPLETE. ``placement`` is the 1-based finishing position within the
+    game, computed once at write time under the game's win condition (passers
+    always rank above failers, then by score / accuracy / combo as the win
+    condition dictates), so a client renders the scoreboard by ordering on it
+    without re-deriving the ranking. ``passed`` is false for a participant who
+    failed the map but still finished the game. ``team`` is 0 for a
+    head-to-head game and 1/2 (blue/red) in a team game.
+    """
+
+    id: int
+    game_id: int
+    user_id: int
+    team: int
+    mods: int
+    score: int
+    max_combo: int
+    num300: int
+    num100: int
+    num50: int
+    num_geki: int
+    num_katu: int
+    num_miss: int
+    acc: float
+    perfect: bool
+    passed: bool
+    placement: int
+    created_at: datetime

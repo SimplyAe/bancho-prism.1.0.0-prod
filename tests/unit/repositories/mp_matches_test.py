@@ -498,6 +498,38 @@ async def test_fetch_games_for_match_pages_newest_first_and_scopes_to_match() ->
     assert older == []
 
 
+async def test_fetch_game_returns_one_game_or_none() -> None:
+    repository, _database = _repo()
+    match = await repository.create_match(
+        name="lobby",
+        host_id=3,
+        has_public_history=True,
+    )
+    game = await repository.record_game(
+        match_id=match.id,
+        map_md5="a" * 32,
+        map_id=1,
+        map_name="map1",
+        mode=0,
+        mods=0,
+        win_condition=0,
+        team_type=0,
+        freemods=False,
+        scrim=False,
+        participants=[4],
+    )
+
+    # a client-supplied id resolves to the game, carrying its parent match id
+    # (which the read side checks before disclosing the game's scoreboard)...
+    fetched = await repository.fetch_game(game.id)
+    assert fetched is not None
+    assert fetched.id == game.id
+    assert fetched.match_id == match.id
+
+    # ...and an unknown id is an ordinary None, not the assert `_fetch_game` uses.
+    assert await repository.fetch_game(999) is None
+
+
 # --- per-player scoreboards ------------------------------------------------
 
 

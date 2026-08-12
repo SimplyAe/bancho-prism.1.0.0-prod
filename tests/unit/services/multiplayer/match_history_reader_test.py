@@ -25,6 +25,7 @@ from typing import Any
 
 from app.repositories.mp_matches import MpMatch
 from app.repositories.mp_matches import MpMatchGame
+from app.repositories.mp_matches import MpMatchGameScore
 from app.services.multiplayer.match_history_reader import MatchHistoryService
 
 _NOW = datetime(2026, 8, 12, 20, 0, 0)
@@ -67,14 +68,40 @@ def _game(game_id: int, *, match_id: int) -> MpMatchGame:
     )
 
 
+def _score(game_id: int, user_id: int, *, placement: int) -> MpMatchGameScore:
+    return MpMatchGameScore(
+        id=user_id,
+        game_id=game_id,
+        user_id=user_id,
+        team=0,
+        mods=0,
+        score=1_000_000 - placement,
+        max_combo=0,
+        num300=0,
+        num100=0,
+        num50=0,
+        num_geki=0,
+        num_katu=0,
+        num_miss=0,
+        acc=100.0,
+        perfect=False,
+        passed=True,
+        placement=placement,
+        created_at=_NOW,
+    )
+
+
 class _FakeMatchesRepository:
     """Returns canned match/game rows and records the queries it received."""
 
     def __init__(self) -> None:
         self.matches_by_id: dict[int, MpMatch] = {}
         self.games_by_match: dict[int, list[MpMatchGame]] = {}
+        self.games_by_id: dict[int, MpMatchGame] = {}
+        self.scores_by_game: dict[int, list[MpMatchGameScore]] = {}
         self.recent_calls: list[SimpleNamespace] = []
         self.games_calls: list[SimpleNamespace] = []
+        self.scores_calls: list[int] = []
         self.recent_result: list[MpMatch] = []
 
     async def fetch_recent_matches(
@@ -92,6 +119,9 @@ class _FakeMatchesRepository:
     async def fetch_match(self, match_id: int) -> MpMatch | None:
         return self.matches_by_id.get(match_id)
 
+    async def fetch_game(self, game_id: int) -> MpMatchGame | None:
+        return self.games_by_id.get(game_id)
+
     async def fetch_games_for_match(
         self,
         match_id: int,
@@ -103,6 +133,10 @@ class _FakeMatchesRepository:
             SimpleNamespace(match_id=match_id, before_id=before_id, limit=limit),
         )
         return self.games_by_match.get(match_id, [])
+
+    async def fetch_scores_for_game(self, game_id: int) -> list[MpMatchGameScore]:
+        self.scores_calls.append(game_id)
+        return self.scores_by_game.get(game_id, [])
 
 
 def _service() -> tuple[MatchHistoryService, _FakeMatchesRepository]:
@@ -233,6 +267,114 @@ async def test_fetch_games_lets_the_host_read_their_private_lobby() -> None:
 
     assert games is not None
     assert [g.id for g in games] == [1]
+
+
+# --- game scores: match visibility + game-ownership gate -------------------
+
+
+async def test_fetch_game_scores_returns_the_scoreboard_for_a_visible_game() -> None:
+    service, repository = _service()
+    repository.matches_by_id[5] = _match(5, has_public_history=True)
+    repository.games_by_id[8] = _game(8, match_id=5)
+    repository.scores_by_game[8] = [
+        _score(8, 20, placement=1),
+        _score(8, 10, placement=2),
+    ]
+
+    scores = await service.fetch_game_scores(5, 8, viewer_id=None)
+
+    assert scores is not None
+    assert [(s.user_id, s.placement) for s in scores] == [(20, 1), (10, 2)]
+
+
+async def test_fetch_game_scores_returns_none_for_an_inaccessible_match() -> None:
+    service, repository = _service()
+    repository.matches_by_id[5] = _match(5, has_public_history=False)
+    repository.games_by_id[8] = _game(8, match_id=5)
+    repository.scores_by_game[8] = [_score(8, 20, placement=1)]
+
+    # the parent match is not visible -> None, and the game/scores are never read.
+    scores = await service.fetch_game_scores(5, 8, viewer_id=_STRANGER_ID)
+
+    assert scores is None
+    assert repository.scores_calls == []
+
+
+async def test_fetch_game_scores_returns_none_when_the_game_belongs_to_another_match() -> (
+    None
+):
+    service, repository = _service()
+    # both matches are public and readable...
+    repository.matches_by_id[5] = _match(5, has_public_history=True)
+    repository.matches_by_id[6] = _match(6, has_public_history=True)
+    # ...but game 8 belongs to match 6, not the match 5 it is requested under.
+    repository.games_by_id[8] = _game(8, match_id=6)
+    repository.scores_by_game[8] = [_score(8, 20, placement=1)]
+
+    scores = await service.fetch_game_scores(5, 8, viewer_id=None)
+
+    # a game cannot be read through the wrong match, so its scores stay hidden.
+    assert scores is None
+    assert repository.scores_calls == []
+
+
+async def test_fetch_game_scores_returns_none_for_an_unknown_game() -> None:
+    service, repository = _service()
+    repository.matches_by_id[5] = _match(5, has_public_history=True)
+    # no game 8 recorded.
+
+    scores = await service.fetch_game_scores(5, 8, viewer_id=None)
+
+    assert scores is None
+    assert repository.scores_calls == []
+
+
+async def test_fetch_game_scores_returns_none_for_an_unknown_match() -> None:
+    service, repository = _service()
+    repository.games_by_id[8] = _game(8, match_id=5)
+
+    assert await service.fetch_game_scores(404, 8, viewer_id=_HOST_ID) is None
+
+
+async def test_fetch_game_scores_distinguishes_an_empty_scoreboard_from_a_missing_game() -> (
+    None
+):
+    service, repository = _service()
+    repository.matches_by_id[5] = _match(5, has_public_history=True)
+    repository.games_by_id[8] = _game(8, match_id=5)
+    # a real, visible game with no recorded scores yet.
+
+    scores = await service.fetch_game_scores(5, 8, viewer_id=None)
+
+    # an empty list, NOT None -- an empty scoreboard is not a missing game.
+    assert scores == []
+    assert repository.scores_calls == [8]
+
+
+async def test_fetch_game_scores_lets_the_host_read_their_private_games_board() -> None:
+    service, repository = _service()
+    repository.matches_by_id[5] = _match(5, has_public_history=False, host_id=_HOST_ID)
+    repository.games_by_id[8] = _game(8, match_id=5)
+    repository.scores_by_game[8] = [_score(8, 4, placement=1)]
+
+    scores = await service.fetch_game_scores(5, 8, viewer_id=_HOST_ID)
+
+    assert scores is not None
+    assert [s.user_id for s in scores] == [4]
+
+
+async def test_fetch_game_scores_lets_staff_read_any_private_games_board() -> None:
+    service, repository = _service()
+    repository.matches_by_id[5] = _match(5, has_public_history=False, host_id=_HOST_ID)
+    repository.games_by_id[8] = _game(8, match_id=5)
+    repository.scores_by_game[8] = [_score(8, 4, placement=1)]
+
+    scores = await service.fetch_game_scores(
+        5, 8, viewer_id=_STRANGER_ID, viewer_is_staff=True
+    )
+
+    assert scores is not None
+    assert [s.user_id for s in scores] == [4]
 
 
 # a small guard that the fake matches the real repository's keyword surface.

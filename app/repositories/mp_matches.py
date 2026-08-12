@@ -449,6 +449,19 @@ class MpMatchesRepository:
         assert row is not None  # inserted immediately before every call site.
         return self._deserialize_game(row)
 
+    async def fetch_game(self, game_id: int) -> MpMatchGame | None:
+        """One game by its durable id, or ``None`` if unknown.
+
+        Distinct from the private ``_fetch_game``, which asserts the row exists
+        because it is only ever called right after inserting it. This one serves
+        a client-supplied id, so a miss is an ordinary ``None`` rather than a
+        crash. The read side uses it to confirm a game belongs to the match it
+        was requested under before disclosing that game's scoreboard.
+        """
+        select_stmt = select(*GAME_READ_PARAMS).where(MpMatchGamesTable.id == game_id)
+        row = await self._database.fetch_one(select_stmt)
+        return self._deserialize_game(row) if row is not None else None
+
     async def fetch_match(self, match_id: int) -> MpMatch | None:
         """One match by its durable id, or ``None`` if unknown."""
         select_stmt = select(*MATCH_READ_PARAMS).where(MpMatchesTable.id == match_id)
