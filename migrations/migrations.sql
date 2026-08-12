@@ -681,3 +681,50 @@ create index mp_match_games_map_md5_index
 	on mp_match_games (map_md5);
 create index mp_match_games_started_at_index
 	on mp_match_games (started_at);
+
+# v5.3.6
+# Prism social: per-player multiplayer scoreboards (Track 4.5, depth). v5.3.5
+# recorded that a game happened and *who* was in it, but not *how they did* --
+# osu! streams each player's live score to the server via MATCH_SCORE_UPDATE,
+# but stock bancho.py only rebroadcasts those frames to the room and throws them
+# away. This table keeps the final frame of each participant, so a completed
+# game has an actual scoreboard: score, combo, accuracy components, grade
+# inputs, mods, team, and whether they passed.
+#
+# One row per participant per game (child of mp_match_games). The score fields
+# are the last MATCH_SCORE_UPDATE frame the server saw from that player before
+# MATCH_COMPLETE, captured cheaply on the hot path (the raw frame is stashed on
+# the slot, unparsed) and decoded once at completion off the packet handler.
+# `passed` is false for a player who signalled MATCH_FAILED during the game.
+# `placement` is the 1-based rank within the game under its win condition,
+# computed at write time so a scoreboard needs no re-sort on read.
+#
+# As elsewhere the foreign keys (game_id -> mp_match_games, user_id -> users)
+# are enforced in application logic, not the DB. Its own version block so a DB
+# already at 5.3.5 still picks this up on the next run.
+create table mp_match_game_scores
+(
+	id bigint auto_increment
+		primary key,
+	game_id bigint not null,
+	user_id int not null,
+	team tinyint(1) default 0 not null,
+	mods int default 0 not null,
+	score int default 0 not null,
+	max_combo int default 0 not null,
+	num300 int default 0 not null,
+	num100 int default 0 not null,
+	num50 int default 0 not null,
+	num_geki int default 0 not null,
+	num_katu int default 0 not null,
+	num_miss int default 0 not null,
+	acc float(6,3) default 0.000 not null,
+	perfect tinyint(1) default 0 not null,
+	passed tinyint(1) default 1 not null,
+	placement int default 0 not null,
+	created_at datetime default current_timestamp not null
+);
+create index mp_match_game_scores_game_id_placement_index
+	on mp_match_game_scores (game_id, placement);
+create index mp_match_game_scores_user_id_index
+	on mp_match_game_scores (user_id);

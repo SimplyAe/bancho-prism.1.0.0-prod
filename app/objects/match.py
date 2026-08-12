@@ -94,6 +94,15 @@ class Slot:
         self.loaded = False
         self.skipped = False
 
+        # Per-game scoreboard capture (Prism). `last_score_frame` is the raw
+        # bytes of the most recent MATCH_SCORE_UPDATE frame this slot's player
+        # sent during the current game, stashed unparsed on the hot path and
+        # decoded once at MATCH_COMPLETE. `passed` starts true and is flipped by
+        # MATCH_FAILED. Both are transient to one game: `start()` clears them for
+        # the new game and `reset()` clears them when the slot empties.
+        self.last_score_frame: bytes | None = None
+        self.passed = True
+
     def empty(self) -> bool:
         return self.player is None
 
@@ -110,6 +119,8 @@ class Slot:
         self.mods = Mods.NOMOD
         self.loaded = False
         self.skipped = False
+        self.last_score_frame = None
+        self.passed = True
 
 
 class StartingTimers(TypedDict):
@@ -336,6 +347,10 @@ class Match:
                     s.status = SlotStatus.playing
                 else:
                     no_map.append(s.player.id)
+            # clear the previous game's per-player scoreboard capture so this
+            # game starts from a clean slate (no leftover frame, passed reset).
+            s.last_score_frame = None
+            s.passed = True
 
         self.in_progress = True
         # remember when this game began so the completed-game history row can

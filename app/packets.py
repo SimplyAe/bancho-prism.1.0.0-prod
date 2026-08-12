@@ -699,6 +699,39 @@ def write_scoreframe(s: ScoreFrame) -> bytes:
     )
 
 
+def decode_scoreframe(raw: bytes | memoryview) -> ScoreFrame | None:
+    """Decode a raw MATCH_SCORE_UPDATE frame captured off the wire.
+
+    ``MatchScoreUpdate`` stashes the packet body verbatim on the hot path
+    (``reader.read_raw()``) without paying to parse it -- that body *is* an osu!
+    scoreframe. This decodes one such stored blob once, at match completion, off
+    the packet handler.
+
+    Unlike ``BanchoPacketReader.read_scoreframe`` this is total: the input is
+    untrusted client bytes replayed from a slot, so a truncated or malformed
+    frame returns ``None`` (the participant is dropped from the scoreboard)
+    rather than raising into the fire-and-forget persistence task.
+    """
+    view = memoryview(raw)
+    if len(view) < SCOREFRAME_FMT.size:
+        return None
+
+    try:
+        sf = ScoreFrame(*SCOREFRAME_FMT.unpack_from(view))
+    except struct.error:
+        return None
+
+    if sf.score_v2:
+        # score_v2 frames carry two extra little-endian f64s after the 29-byte
+        # base; a frame that claims v2 but lacks them is malformed -> drop it.
+        rest = view[SCOREFRAME_FMT.size :]
+        if len(rest) < 16:
+            return None
+        sf.combo_portion, sf.bonus_portion = struct.unpack_from("<dd", rest)
+
+    return sf
+
+
 _noexpand_types: dict[osuTypes, Callable[..., bytes | bytearray]] = {
     # base
     osuTypes.i8: struct.Struct("<b").pack,

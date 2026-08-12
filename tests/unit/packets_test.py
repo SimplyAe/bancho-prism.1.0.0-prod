@@ -384,6 +384,87 @@ def test_write_match_score_update(test_input, expected):
     assert app.packets.match_score_update(test_input) == expected
 
 
+def _scoreframe_bytes(*, score_v2: bool) -> bytes:
+    """A raw MATCH_SCORE_UPDATE frame body (no packet header)."""
+    sf = app.packets.ScoreFrame(
+        time=38242,
+        id=0,
+        num300=320,
+        num100=48,
+        num50=2,
+        num_geki=32,
+        num_katu=8,
+        num_miss=3,
+        total_score=492_392,
+        current_combo=39,
+        max_combo=122,
+        perfect=False,
+        current_hp=245,
+        tag_byte=0,
+        score_v2=score_v2,
+    )
+    raw = bytearray(app.packets.write_scoreframe(sf))
+    if score_v2:
+        # score_v2 frames trail two f64s (combo/bonus portions).
+        raw += struct.pack("<dd", 0.75, 0.25)
+    return bytes(raw)
+
+
+def test_decode_scoreframe_round_trips_a_v1_frame():
+    raw = _scoreframe_bytes(score_v2=False)
+
+    sf = app.packets.decode_scoreframe(raw)
+
+    assert sf is not None
+    assert (sf.num300, sf.num100, sf.num50) == (320, 48, 2)
+    assert (sf.num_geki, sf.num_katu, sf.num_miss) == (32, 8, 3)
+    assert sf.total_score == 492_392
+    assert sf.max_combo == 122
+    assert sf.perfect is False
+    assert sf.score_v2 is False
+    # a v1 frame carries no portion fields.
+    assert sf.combo_portion is None
+    assert sf.bonus_portion is None
+
+
+def test_decode_scoreframe_reads_the_score_v2_portions():
+    raw = _scoreframe_bytes(score_v2=True)
+
+    sf = app.packets.decode_scoreframe(raw)
+
+    assert sf is not None
+    assert sf.score_v2 is True
+    assert sf.combo_portion == 0.75
+    assert sf.bonus_portion == 0.25
+
+
+def test_decode_scoreframe_accepts_a_memoryview():
+    raw = _scoreframe_bytes(score_v2=False)
+
+    sf = app.packets.decode_scoreframe(memoryview(raw))
+
+    assert sf is not None
+    assert sf.total_score == 492_392
+
+
+def test_decode_scoreframe_rejects_a_truncated_frame():
+    raw = _scoreframe_bytes(score_v2=False)
+
+    # a frame shorter than the 29-byte base is malformed -> dropped, not raised.
+    assert app.packets.decode_scoreframe(raw[:20]) is None
+
+
+def test_decode_scoreframe_rejects_a_v2_frame_missing_its_portions():
+    # claims score_v2 but the trailing 16 bytes of portions were truncated away.
+    raw = _scoreframe_bytes(score_v2=True)[:29]
+
+    assert app.packets.decode_scoreframe(raw) is None
+
+
+def test_decode_scoreframe_rejects_empty_input():
+    assert app.packets.decode_scoreframe(b"") is None
+
+
 def test_write_match_transfer_host():
     assert app.packets.match_transfer_host() == b"2\x00\x00\x00\x00\x00\x00"
 

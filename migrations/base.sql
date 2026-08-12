@@ -427,6 +427,33 @@ create index mp_match_games_map_md5_index
 create index mp_match_games_started_at_index
 	on mp_match_games (started_at);
 
+create table mp_match_game_scores
+(
+	id bigint auto_increment
+		primary key,
+	game_id bigint not null,
+	user_id int not null,
+	team tinyint(1) default 0 not null,
+	mods int default 0 not null,
+	score int default 0 not null,
+	max_combo int default 0 not null,
+	num300 int default 0 not null,
+	num100 int default 0 not null,
+	num50 int default 0 not null,
+	num_geki int default 0 not null,
+	num_katu int default 0 not null,
+	num_miss int default 0 not null,
+	acc float(6,3) default 0.000 not null,
+	perfect tinyint(1) default 0 not null,
+	passed tinyint(1) default 1 not null,
+	placement int default 0 not null,
+	created_at datetime default current_timestamp not null
+);
+create index mp_match_game_scores_game_id_placement_index
+	on mp_match_game_scores (game_id, placement);
+create index mp_match_game_scores_user_id_index
+	on mp_match_game_scores (user_id);
+
 create table stats
 (
 	id int auto_increment,

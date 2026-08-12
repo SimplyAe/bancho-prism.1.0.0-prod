@@ -1736,6 +1736,13 @@ class MatchScoreUpdate(BasePacket):
         slot_id = player.match.get_slot_id(player)
         assert slot_id is not None
 
+        # stash this player's latest score frame on their slot so the completed
+        # game can be given a scoreboard (Prism). We copy the raw bytes -- the
+        # play_data memoryview points into a per-request buffer that is gone once
+        # this handler returns -- but do NOT parse them here: this is the hot
+        # path, and the frame is only ever decoded once, at MATCH_COMPLETE.
+        player.match.slots[slot_id].last_score_frame = bytes(self.play_data)
+
         # if scorev2 is enabled, read an extra 8 bytes.
         buf = bytearray(b"0\x00\x00")
         buf += len(self.play_data).to_bytes(4, "little")
@@ -1907,6 +1914,11 @@ class MatchFailed(BasePacket):
         # they've failed to all other players in the match.
         slot_id = player.match.get_slot_id(player)
         assert slot_id is not None
+
+        # record the fail on the slot so the completed game's scoreboard marks
+        # this participant as not-passed (Prism). Cleared for the next game by
+        # Match.start().
+        player.match.slots[slot_id].passed = False
 
         player.match.enqueue(app.packets.match_player_failed(slot_id), lobby=False)
 
