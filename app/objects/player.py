@@ -33,6 +33,7 @@ from app.objects.match import SlotStatus
 from app.objects.score import Grade
 from app.objects.score import Score
 from app.repositories.legacy import get_legacy_repositories
+from app.services.multiplayer.match_history import persist_match_disbanded
 from app.utils import escape_enum
 from app.utils import make_safe_name
 from app.utils import pymysql_encode
@@ -669,6 +670,17 @@ class Player:
             lobby = app.state.sessions.channels.get_by_name("#lobby")
             if lobby:
                 lobby.enqueue(app.packets.dispose_match(self.match.id))
+
+            # the lobby has torn down; stamp its durable history record's
+            # disband time (Prism). Fire-and-forget, and a no-op if the match
+            # was never persisted (db_id is None).
+            _ = spawn_background_task(
+                persist_match_disbanded(
+                    get_legacy_repositories().mp_matches,
+                    match_db_id=self.match.db_id,
+                ),
+                name="persist-match-disbanded",
+            )
 
         else:  # multi is not empty
             if self is self.match.host:

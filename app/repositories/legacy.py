@@ -15,6 +15,7 @@ from app.repositories.logs import LogsRepository
 from app.repositories.mail import MailRepository
 from app.repositories.map_requests import MapRequestsRepository
 from app.repositories.maps import MapsRepository
+from app.repositories.mp_matches import MpMatchesRepository
 from app.repositories.ratings import RatingsRepository
 from app.repositories.scores import ScoresRepository
 from app.repositories.stats import StatsRepository
@@ -40,6 +41,7 @@ class LegacyRepositories:
     mail: MailRepository
     map_requests: MapRequestsRepository
     maps: MapsRepository
+    mp_matches: MpMatchesRepository
     ratings: RatingsRepository
     scores: ScoresRepository
     stats: StatsRepository
@@ -65,6 +67,7 @@ def get_legacy_repositories() -> LegacyRepositories:
         mail=MailRepository(database),
         map_requests=MapRequestsRepository(database),
         maps=MapsRepository(database),
+        mp_matches=MpMatchesRepository(database),
         ratings=RatingsRepository(database),
         scores=ScoresRepository(database),
         stats=StatsRepository(database),

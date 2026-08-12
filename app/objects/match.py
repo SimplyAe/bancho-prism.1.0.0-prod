@@ -165,6 +165,14 @@ class Match:
         self.passwd = password
         self.has_public_history = has_public_history
 
+        # The durable `mp_matches.id` assigned once this lobby is persisted, or
+        # None until then (and if persistence failed). The game/disband history
+        # writes reference it; a None here makes them skip rather than orphan.
+        self.db_id: int | None = None
+        # Stamped by `start()` when a game begins, so the completed-game history
+        # row can record a real started_at. None between games.
+        self.current_game_started_at: datetime | None = None
+
         self.host_id = host_id
         self.referees: set[Player] = set()
 
@@ -330,6 +338,9 @@ class Match:
                     no_map.append(s.player.id)
 
         self.in_progress = True
+        # remember when this game began so the completed-game history row can
+        # record its real start time (this is a cheap timestamp, no I/O).
+        self.current_game_started_at = datetime.now()
         self.enqueue(app.packets.match_start(self), immune=no_map, lobby=False)
         self.enqueue_state()
 

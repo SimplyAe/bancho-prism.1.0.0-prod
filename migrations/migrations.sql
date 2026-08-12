@@ -615,3 +615,69 @@ create index activity_events_event_type_index
 	on activity_events (event_type);
 create index activity_events_created_at_index
 	on activity_events (created_at);
+
+# v5.3.5
+# Prism social: multiplayer match persistence (Track 4.5). Stock bancho.py holds
+# every multiplayer match purely in memory (`app.state.sessions.matches`), so a
+# restart erases all match history -- who hosted, what maps were played, when.
+# `Match.id` there is a recycled 0-15 lobby *slot*, not a durable key, so these
+# tables carry their own auto-increment ids and the in-memory match stashes the
+# durable `mp_matches.id` on itself for the game rows to reference.
+#
+# Two tables, mirroring the in-memory shape:
+#  - `mp_matches`: one row per lobby lifetime. Written when the lobby is created,
+#    and `disbanded_at` is stamped when the last player leaves and the match is
+#    torn down. `has_public_history` carries the //private privacy flag so a
+#    private lobby's history stays private.
+#  - `mp_match_games`: one row per *completed* game within a lobby (each map that
+#    ran to MATCH_COMPLETE). A game that everyone quits mid-map is not recorded
+#    -- an abandoned game is not history. Participants are stored as a JSON array
+#    of user ids (like activity_events.data) rather than a third join table, with
+#    a denormalised `participant_count` so "how many played" needs no parse. The
+#    map/mode/mods/win-condition/team-type snapshot is copied at completion so
+#    the record survives even after the lobby changes maps.
+#
+# As with the rest of the schema the foreign keys (host_id -> users,
+# match_id -> mp_matches) are enforced in application logic, not by the DB, so a
+# purged player or match orphans rather than cascades. Its own version block so a
+# DB already at 5.3.4 (the activity-feed migration) still picks this up on the
+# next run.
+create table mp_matches
+(
+	id bigint auto_increment
+		primary key,
+	name varchar(50) not null,
+	host_id int not null,
+	has_public_history tinyint(1) default 1 not null,
+	created_at datetime default current_timestamp not null,
+	disbanded_at datetime null
+);
+create index mp_matches_host_id_index
+	on mp_matches (host_id);
+create index mp_matches_created_at_index
+	on mp_matches (created_at);
+create table mp_match_games
+(
+	id bigint auto_increment
+		primary key,
+	match_id bigint not null,
+	map_md5 char(32) not null,
+	map_id int default 0 not null,
+	map_name varchar(256) default '' not null,
+	mode tinyint(1) default 0 not null,
+	mods int default 0 not null,
+	win_condition tinyint(1) default 0 not null,
+	team_type tinyint(1) default 0 not null,
+	freemods tinyint(1) default 0 not null,
+	scrim tinyint(1) default 0 not null,
+	participant_count int default 0 not null,
+	participants text null,
+	started_at datetime default current_timestamp not null,
+	ended_at datetime null
+);
+create index mp_match_games_match_id_id_index
+	on mp_match_games (match_id, id);
+create index mp_match_games_map_md5_index
+	on mp_match_games (map_md5);
+create index mp_match_games_started_at_index
+	on mp_match_games (started_at);

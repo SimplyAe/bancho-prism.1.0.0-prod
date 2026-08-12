@@ -66,6 +66,8 @@ from app.packets import ClientPackets
 from app.packets import LoginFailureReason
 from app.repositories.legacy import get_legacy_repositories
 from app.services.bancho import BanchoLoginService
+from app.services.multiplayer.match_history import persist_game_completed
+from app.services.multiplayer.match_history import persist_match_created
 from app.services.performance import PerformanceService
 from app.services.performance import ScoreParams
 from app.state import services
@@ -1438,6 +1440,24 @@ class MatchCreate(BasePacket):
         match.chat.send_bot(f"Match created by {player.name}.")
         log(f"{player} created a new multiplayer match.")
 
+        # persist the durable match-history record (Prism); fire-and-forget so
+        # the lobby is usable immediately and a history-write failure never
+        # blocks or breaks match creation. The producer hands the durable id
+        # back onto the live match so its game/disband rows can reference it.
+        def _stash_db_id(db_id: int) -> None:
+            match.db_id = db_id
+
+        _ = spawn_background_task(
+            persist_match_created(
+                get_legacy_repositories().mp_matches,
+                _stash_db_id,
+                name=match.name,
+                host_id=match.host_id,
+                has_public_history=match.has_public_history,
+            ),
+            name="persist-match-created",
+        )
+
 
 @register(ClientPackets.JOIN_MATCH)
 class MatchJoin(BasePacket):
@@ -1771,6 +1791,32 @@ class MatchComplete(BasePacket):
                 player.match.update_matchpoints(was_playing),
                 name="update-matchpoints",
             )
+
+        # persist the completed game to durable match history (Prism). The
+        # match object is mutable and its map may change before the background
+        # task runs, so every field is snapshotted synchronously here, at
+        # coroutine-creation time. Fire-and-forget: a history-write failure must
+        # not disturb the completion the clients have already been told about.
+        match = player.match
+        participant_ids = [s.player.id for s in was_playing if s.player is not None]
+        _ = spawn_background_task(
+            persist_game_completed(
+                get_legacy_repositories().mp_matches,
+                match_db_id=match.db_id,
+                map_md5=match.map_md5,
+                map_id=match.map_id,
+                map_name=match.map_name,
+                mode=int(match.mode),
+                mods=int(match.mods),
+                win_condition=int(match.win_condition),
+                team_type=int(match.team_type),
+                freemods=match.freemods,
+                scrim=match.is_scrimming,
+                participants=participant_ids,
+                started_at=match.current_game_started_at,
+            ),
+            name="persist-match-game",
+        )
 
 
 @register(ClientPackets.MATCH_CHANGE_MODS)

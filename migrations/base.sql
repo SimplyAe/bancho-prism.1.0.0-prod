@@ -386,6 +386,47 @@ create index activity_events_event_type_index
 create index activity_events_created_at_index
 	on activity_events (created_at);
 
+create table mp_matches
+(
+	id bigint auto_increment
+		primary key,
+	name varchar(50) not null,
+	host_id int not null,
+	has_public_history tinyint(1) default 1 not null,
+	created_at datetime default current_timestamp not null,
+	disbanded_at datetime null
+);
+create index mp_matches_host_id_index
+	on mp_matches (host_id);
+create index mp_matches_created_at_index
+	on mp_matches (created_at);
+
+create table mp_match_games
+(
+	id bigint auto_increment
+		primary key,
+	match_id bigint not null,
+	map_md5 char(32) not null,
+	map_id int default 0 not null,
+	map_name varchar(256) default '' not null,
+	mode tinyint(1) default 0 not null,
+	mods int default 0 not null,
+	win_condition tinyint(1) default 0 not null,
+	team_type tinyint(1) default 0 not null,
+	freemods tinyint(1) default 0 not null,
+	scrim tinyint(1) default 0 not null,
+	participant_count int default 0 not null,
+	participants text null,
+	started_at datetime default current_timestamp not null,
+	ended_at datetime null
+);
+create index mp_match_games_match_id_id_index
+	on mp_match_games (match_id, id);
+create index mp_match_games_map_md5_index
+	on mp_match_games (map_md5);
+create index mp_match_games_started_at_index
+	on mp_match_games (started_at);
+
 create table stats
 (
 	id int auto_increment,
