@@ -55,6 +55,20 @@ class TourneyPoolsService:
     ) -> list[TourneyPoolMap]:
         return await self.tourney_pool_maps.fetch_many(pool_id=pool_id)
 
+    async def fetch_pool_maps(self, pool_id: int) -> list[TourneyPoolMap] | None:
+        """A pool's map picks, or ``None`` if the pool itself does not exist.
+
+        Distinct from :meth:`fetch_tourney_pool_maps`, which is used on paths
+        that already hold the pool: this one confirms the pool exists first, so
+        a caller reading a pool's maps by id can tell an unknown pool (``None``
+        -> 404) apart from a real pool with no picks yet (``[]``), rather than
+        conflating the two into an empty list.
+        """
+        pool = await self.tourney_pools.fetch_by_id(id=pool_id)
+        if pool is None:
+            return None
+        return await self.tourney_pool_maps.fetch_many(pool_id=pool_id)
+
     async def fetch_pool_map_pick(
         self,
         *,

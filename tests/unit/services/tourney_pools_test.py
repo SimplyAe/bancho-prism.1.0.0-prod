@@ -267,3 +267,31 @@ async def test_pool_reads() -> None:
 
     pick = await service.fetch_pool_map_pick(pool_id=1, mods=8, slot=2)
     assert pick is not None and pick.map_id == 101
+
+
+async def test_fetch_pool_maps_returns_the_picks_for_an_existing_pool() -> None:
+    service, *_ = _service(
+        pools=[_pool()],
+        pool_maps=[_pool_map(101, slot=1), _pool_map(102, slot=2)],
+    )
+
+    maps = await service.fetch_pool_maps(1)
+
+    assert maps is not None
+    assert sorted(pool_map.map_id for pool_map in maps) == [101, 102]
+
+
+async def test_fetch_pool_maps_returns_none_for_a_missing_pool() -> None:
+    service, *_ = _service()
+
+    # the pool itself does not exist -> None (HTTP 404), not an empty list.
+    assert await service.fetch_pool_maps(42) is None
+
+
+async def test_fetch_pool_maps_distinguishes_an_empty_pool_from_a_missing_one() -> None:
+    service, *_ = _service(pools=[_pool()])  # a real pool with no picks
+
+    maps = await service.fetch_pool_maps(1)
+
+    # an empty list, NOT None -- an empty pool is not a missing one.
+    assert maps == []

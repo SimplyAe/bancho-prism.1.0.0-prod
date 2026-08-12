@@ -13,6 +13,7 @@ from . import players
 from . import scores
 from . import server
 from . import sessions
+from . import tourney_pools
 
 apiv2_router = APIRouter(tags=["API v2"], prefix="/v2")
 
@@ -27,3 +28,4 @@ apiv2_router.include_router(players.router)
 apiv2_router.include_router(scores.router)
 apiv2_router.include_router(server.router)
 apiv2_router.include_router(sessions.router)
+apiv2_router.include_router(tourney_pools.router)
