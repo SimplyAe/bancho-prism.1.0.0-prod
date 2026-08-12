@@ -20,6 +20,7 @@ from app.api.v2.common.parameters import GameModeParam
 from app.api.v2.common.responses import Failure
 from app.api.v2.common.responses import Success
 from app.api.v2.models.maps import MostPlayedMap
+from app.api.v2.models.players import FollowStats
 from app.api.v2.models.players import PasswordUpdate
 from app.api.v2.models.players import Player
 from app.api.v2.models.players import PlayerStats
@@ -308,6 +309,81 @@ async def remove_player_friend(
 
     await relationships_service.remove_friend(actor.id, target_id)
     return responses.success(None)
+
+
+@router.get("/players/{player_id}/followers")
+async def get_player_followers(
+    player_id: int,
+    *,
+    actor: Annotated[
+        User | None,
+        Depends(actors.get_optional_actor),
+    ],
+    players_service: Annotated[
+        PlayersService,
+        Depends(api_dependencies.get_players_service),
+    ],
+    relationships_service: Annotated[
+        RelationshipsService,
+        Depends(api_dependencies.get_relationships_service),
+    ],
+) -> Success[list[Player]] | Failure:
+    # public, but a hidden target is reported missing like anywhere else, so its
+    # follower list is not a side channel to its existence.
+    target = await players_service.fetch_player(player_id)
+    if target is None or not can_view_player(
+        viewer=actor,
+        target_id=target.id,
+        target_priv=target.priv,
+    ):
+        return responses.failure(
+            message="Player not found.",
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+
+    followers = await relationships_service.fetch_followers(player_id, viewer=actor)
+    response = [Player.model_validate(rec) for rec in followers]
+    return responses.success(response, meta={"total": len(response)})
+
+
+@router.get("/players/{player_id}/follow-stats")
+async def get_player_follow_stats(
+    player_id: int,
+    *,
+    actor: Annotated[
+        User | None,
+        Depends(actors.get_optional_actor),
+    ],
+    players_service: Annotated[
+        PlayersService,
+        Depends(api_dependencies.get_players_service),
+    ],
+    relationships_service: Annotated[
+        RelationshipsService,
+        Depends(api_dependencies.get_relationships_service),
+    ],
+) -> Success[FollowStats] | Failure:
+    target = await players_service.fetch_player(player_id)
+    if target is None or not can_view_player(
+        viewer=actor,
+        target_id=target.id,
+        target_priv=target.priv,
+    ):
+        return responses.failure(
+            message="Player not found.",
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+
+    stats = await relationships_service.fetch_follow_stats(player_id, viewer=actor)
+    return responses.success(
+        FollowStats(
+            following=stats.following_count,
+            followers=stats.followers_count,
+            viewer_follows=stats.viewer_follows,
+            viewer_followed_by=stats.viewer_followed_by,
+            viewer_mutuals=stats.viewer_mutuals,
+        ),
+    )
 
 
 @router.get("/players/{player_id}/favourites")

@@ -7,6 +7,7 @@ from sqlalchemy import Column
 from sqlalchemy import Enum
 from sqlalchemy import Integer
 from sqlalchemy import delete
+from sqlalchemy import func
 from sqlalchemy import insert
 from sqlalchemy import select
 
@@ -92,6 +93,62 @@ class RelationshipsRepository:
             self._deserialize_relationship(relationship)
             for relationship in relationships
         ]
+
+    async def fetch_all_incoming(
+        self,
+        user2: int,
+        type: RelationshipType | None = None,
+    ) -> list[Relationship]:
+        """Fetch the relationships pointing *at* a user (the reverse edge).
+
+        ``fetch_all`` reads a user's outgoing edges (``user1 == me``: who I have
+        friended/blocked); this reads the incoming ones (``user2 == me``). For
+        the asymmetric ``FRIEND`` edge that means "who has friended me" -- the
+        followers to ``fetch_all``'s following.
+        """
+        select_stmt = select(*READ_PARAMS).where(RelationshipsTable.user2 == user2)
+        if type is not None:
+            select_stmt = select_stmt.where(RelationshipsTable.type == type)
+
+        relationships = await self._database.fetch_all(select_stmt)
+        return [
+            self._deserialize_relationship(relationship)
+            for relationship in relationships
+        ]
+
+    async def count_outgoing(
+        self,
+        user1: int,
+        type: RelationshipType | None = None,
+    ) -> int:
+        """Count a user's outgoing edges of a type (e.g. how many they follow)."""
+        select_stmt = (
+            select(func.count())
+            .select_from(RelationshipsTable)
+            .where(RelationshipsTable.user1 == user1)
+        )
+        if type is not None:
+            select_stmt = select_stmt.where(RelationshipsTable.type == type)
+
+        count = await self._database.fetch_val(select_stmt)
+        return int(count or 0)
+
+    async def count_incoming(
+        self,
+        user2: int,
+        type: RelationshipType | None = None,
+    ) -> int:
+        """Count a user's incoming edges of a type (e.g. how many follow them)."""
+        select_stmt = (
+            select(func.count())
+            .select_from(RelationshipsTable)
+            .where(RelationshipsTable.user2 == user2)
+        )
+        if type is not None:
+            select_stmt = select_stmt.where(RelationshipsTable.type == type)
+
+        count = await self._database.fetch_val(select_stmt)
+        return int(count or 0)
 
     async def fetch_one(self, user1: int, user2: int) -> Relationship | None:
         """Fetch the relationship between two users, if one exists."""

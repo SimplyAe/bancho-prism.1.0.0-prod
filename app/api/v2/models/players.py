@@ -103,3 +103,21 @@ class PlayerStats(BaseModel):
 class SearchPlayer(BaseModel):
     id: int
     name: str
+
+
+class FollowStats(BaseModel):
+    """A player's follow-graph standing for a profile.
+
+    ``following``/``followers`` are public counts over the directional friend
+    (follow) edge. The ``viewer_*`` flags describe the signed-in caller's own
+    relationship to the player -- all ``False`` for an anonymous caller or a
+    self-view -- so a client can render the follow button and a "follows you" /
+    "mutuals" badge in one request.
+    """
+
+    following: int
+    followers: int
+    viewer_follows: bool
+    viewer_followed_by: bool
+    viewer_mutuals: bool
+
