@@ -33,6 +33,7 @@ from sqlalchemy import Update
 from sqlalchemy.dialects import mysql
 
 from app.repositories.mp_matches import MpMatchesRepository
+from app.repositories.mp_matches import MpMatchGameScoreInput
 
 # a fixed clock standing in for the `now()` server defaults, so ordering ties
 # and default timestamps never hinge on wall-clock time.
@@ -53,13 +54,19 @@ class _FakeDatabase:
     def __init__(self) -> None:
         self.matches: list[dict[str, Any]] = []
         self.games: list[dict[str, Any]] = []
+        self.scores: list[dict[str, Any]] = []
         self._next_match_id = 1
         self._next_game_id = 1
+        self._next_score_id = 1
         # the last compiled disband UPDATE, for SQL-shape assertions.
         self.last_update_sql: str | None = None
 
     def _rows_for(self, table_name: str) -> list[dict[str, Any]]:
-        return self.matches if table_name == "mp_matches" else self.games
+        if table_name == "mp_matches":
+            return self.matches
+        if table_name == "mp_match_game_scores":
+            return self.scores
+        return self.games
 
     async def execute(self, statement: Any) -> int:
         if isinstance(statement, Insert):
@@ -133,6 +140,23 @@ class _FakeDatabase:
 
     async def fetch_all(self, statement: Any) -> list[dict[str, Any]]:
         return self._query(statement)
+
+    async def execute_many(self, query: str, params: list[dict[str, Any]]) -> None:
+        """Persist a batch of raw-SQL rows (the scoreboard insert).
+
+        ``record_game_scores`` uses raw SQL + a list of param dicts (matching the
+        codebase's bulk-insert idiom), so this stores each param dict as a row,
+        assigning the autoincrement id and default ``created_at`` the column would
+        get. The table is inferred from the query text, keeping the fake honest
+        about which store the batch lands in.
+        """
+        table_name = "mp_match_game_scores" if "mp_match_game_scores" in query else ""
+        assert table_name, f"unhandled execute_many target: {query!r}"
+        for param in params:
+            row = {"id": self._next_score_id, "created_at": _NOW}
+            row.update(param)
+            self.scores.append(row)
+            self._next_score_id += 1
 
     def _query(self, statement: Select) -> list[dict[str, Any]]:
         table_name = list(statement.selected_columns)[0].table.name
@@ -472,3 +496,127 @@ async def test_fetch_games_for_match_pages_newest_first_and_scopes_to_match() ->
 
     older = await repository.fetch_games_for_match(match_a.id, before_id=games[-1].id)
     assert older == []
+
+
+# --- per-player scoreboards ------------------------------------------------
+
+
+def _score(
+    user_id: int,
+    *,
+    score: int = 0,
+    acc: float = 0.0,
+    max_combo: int = 0,
+    passed: bool = True,
+    team: int = 0,
+    mods: int = 0,
+) -> MpMatchGameScoreInput:
+    return MpMatchGameScoreInput(
+        user_id=user_id,
+        team=team,
+        mods=mods,
+        score=score,
+        max_combo=max_combo,
+        num300=0,
+        num100=0,
+        num50=0,
+        num_geki=0,
+        num_katu=0,
+        num_miss=0,
+        acc=acc,
+        perfect=False,
+        passed=passed,
+    )
+
+
+async def test_record_game_scores_ranks_by_score_and_round_trips() -> None:
+    repository, _database = _repo()
+
+    written = await repository.record_game_scores(
+        game_id=7,
+        win_condition=0,  # score
+        scores=[
+            _score(10, score=500_000),
+            _score(20, score=900_000),
+            _score(30, score=700_000),
+        ],
+    )
+
+    assert written == 3
+    board = await repository.fetch_scores_for_game(7)
+    # returned already ordered by placement; the highest score is 1st.
+    assert [(s.user_id, s.placement) for s in board] == [(20, 1), (30, 2), (10, 3)]
+    assert all(s.game_id == 7 for s in board)
+
+
+async def test_record_game_scores_ranks_by_accuracy_when_that_is_the_condition() -> (
+    None
+):
+    repository, _database = _repo()
+
+    await repository.record_game_scores(
+        game_id=7,
+        win_condition=1,  # accuracy
+        scores=[
+            _score(10, score=999_999, acc=90.0),  # top score, lower acc
+            _score(20, score=100_000, acc=99.5),  # low score, top acc -> 1st
+        ],
+    )
+
+    board = await repository.fetch_scores_for_game(7)
+    assert [(s.user_id, s.placement) for s in board] == [(20, 1), (10, 2)]
+
+
+async def test_record_game_scores_ranks_by_combo_when_that_is_the_condition() -> None:
+    repository, _database = _repo()
+
+    await repository.record_game_scores(
+        game_id=7,
+        win_condition=2,  # combo
+        scores=[
+            _score(10, score=999_999, max_combo=120),
+            _score(20, score=100_000, max_combo=340),  # top combo -> 1st
+        ],
+    )
+
+    board = await repository.fetch_scores_for_game(7)
+    assert [(s.user_id, s.placement) for s in board] == [(20, 1), (10, 2)]
+
+
+async def test_record_game_scores_ranks_passers_above_failers() -> None:
+    repository, _database = _repo()
+
+    await repository.record_game_scores(
+        game_id=7,
+        win_condition=0,
+        scores=[
+            _score(10, score=900_000, passed=False),  # highest score, but failed
+            _score(20, score=200_000, passed=True),  # passed -> outranks the failer
+        ],
+    )
+
+    board = await repository.fetch_scores_for_game(7)
+    assert [(s.user_id, s.placement) for s in board] == [(20, 1), (10, 2)]
+    # the fail flag round-trips as a real bool.
+    failer = next(s for s in board if s.user_id == 10)
+    assert failer.passed is False
+
+
+async def test_record_game_scores_no_op_on_empty() -> None:
+    repository, database = _repo()
+
+    written = await repository.record_game_scores(
+        game_id=7,
+        win_condition=0,
+        scores=[],
+    )
+
+    assert written == 0
+    assert database.scores == []
+    assert await repository.fetch_scores_for_game(7) == []
+
+
+async def test_fetch_scores_for_game_is_empty_for_an_unrecorded_game() -> None:
+    repository, _database = _repo()
+
+    assert await repository.fetch_scores_for_game(999) == []

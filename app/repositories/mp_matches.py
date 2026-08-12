@@ -25,6 +25,12 @@ Shape mirrors the in-memory model:
   as ``activity_events.data`` stores per-type detail) rather than a third join
   table, with a denormalised ``participant_count`` so "how many played" needs no
   parse.
+- ``mp_match_game_scores`` -- one row per participant per completed game (a child
+  of ``mp_match_games``). osu! streams each player's live score to the server via
+  MATCH_SCORE_UPDATE; stock bancho.py only rebroadcasts those frames and throws
+  them away. Prism keeps the final frame per player, so a completed game has an
+  actual scoreboard: score, combo, accuracy components, mods, team, pass/fail,
+  and a precomputed 1-based ``placement`` under the game's win condition.
 
 Reads page by ``id`` (keyset, ``id < before_id``), never ``OFFSET``: match
 history only ever scrolls backwards from "now", and keyset paging stays O(page)
@@ -50,9 +56,11 @@ from sqlalchemy import func
 from sqlalchemy import insert
 from sqlalchemy import select
 from sqlalchemy import update
+from sqlalchemy.dialects.mysql import FLOAT
 from sqlalchemy.dialects.mysql import TINYINT
 
 from app.adapters.database import Database
+from app.adapters.database import MySQLParams
 from app.adapters.database import MySQLRow
 from app.repositories import Base
 
@@ -139,6 +147,50 @@ class MpMatchGamesTable(Base):
     )
 
 
+class MpMatchGameScoresTable(Base):
+    __tablename__ = "mp_match_game_scores"
+
+    id = Column("id", BigInteger, primary_key=True, autoincrement=True)
+    game_id = Column("game_id", BigInteger, nullable=False)
+    user_id = Column("user_id", Integer, nullable=False)
+    team = Column("team", TINYINT(1), nullable=False, server_default="0")
+    mods = Column("mods", Integer, nullable=False, server_default="0")
+    score = Column("score", Integer, nullable=False, server_default="0")
+    max_combo = Column("max_combo", Integer, nullable=False, server_default="0")
+    num300 = Column("num300", Integer, nullable=False, server_default="0")
+    num100 = Column("num100", Integer, nullable=False, server_default="0")
+    num50 = Column("num50", Integer, nullable=False, server_default="0")
+    num_geki = Column("num_geki", Integer, nullable=False, server_default="0")
+    num_katu = Column("num_katu", Integer, nullable=False, server_default="0")
+    num_miss = Column("num_miss", Integer, nullable=False, server_default="0")
+    acc = Column(
+        "acc",
+        FLOAT(precision=6, scale=3),
+        nullable=False,
+        server_default="0",
+    )
+    perfect = Column("perfect", TINYINT(1), nullable=False, server_default="0")
+    passed = Column("passed", TINYINT(1), nullable=False, server_default="1")
+    placement = Column("placement", Integer, nullable=False, server_default="0")
+    created_at = Column(
+        "created_at",
+        DateTime,
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    __table_args__ = (
+        # a game's scoreboard, already ordered by finishing placement.
+        Index(
+            "mp_match_game_scores_game_id_placement_index",
+            game_id,
+            placement,
+        ),
+        # "every multiplayer score this player has recorded".
+        Index("mp_match_game_scores_user_id_index", user_id),
+    )
+
+
 MATCH_READ_PARAMS = (
     MpMatchesTable.id,
     MpMatchesTable.name,
@@ -164,6 +216,27 @@ GAME_READ_PARAMS = (
     MpMatchGamesTable.participants,
     MpMatchGamesTable.started_at,
     MpMatchGamesTable.ended_at,
+)
+
+GAME_SCORE_READ_PARAMS = (
+    MpMatchGameScoresTable.id,
+    MpMatchGameScoresTable.game_id,
+    MpMatchGameScoresTable.user_id,
+    MpMatchGameScoresTable.team,
+    MpMatchGameScoresTable.mods,
+    MpMatchGameScoresTable.score,
+    MpMatchGameScoresTable.max_combo,
+    MpMatchGameScoresTable.num300,
+    MpMatchGameScoresTable.num100,
+    MpMatchGameScoresTable.num50,
+    MpMatchGameScoresTable.num_geki,
+    MpMatchGameScoresTable.num_katu,
+    MpMatchGameScoresTable.num_miss,
+    MpMatchGameScoresTable.acc,
+    MpMatchGameScoresTable.perfect,
+    MpMatchGameScoresTable.passed,
+    MpMatchGameScoresTable.placement,
+    MpMatchGameScoresTable.created_at,
 )
 
 
@@ -194,6 +267,57 @@ class MpMatchGame:
     participants: list[int]
     started_at: datetime
     ended_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class MpMatchGameScore:
+    """One participant's final scoreboard row in a completed game."""
+
+    id: int
+    game_id: int
+    user_id: int
+    team: int
+    mods: int
+    score: int
+    max_combo: int
+    num300: int
+    num100: int
+    num50: int
+    num_geki: int
+    num_katu: int
+    num_miss: int
+    acc: float
+    perfect: bool
+    passed: bool
+    placement: int
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class MpMatchGameScoreInput:
+    """A single participant's result to persist, before it has a game id.
+
+    The producer builds one of these per participant from a decoded scoreframe;
+    ``record_game_scores`` computes ``placement`` across the set and writes them
+    as the game's child rows. ``placement`` is intentionally absent here -- it is
+    a property of the whole scoreboard, not of one row, so it is assigned at
+    write time rather than by the caller.
+    """
+
+    user_id: int
+    team: int
+    mods: int
+    score: int
+    max_combo: int
+    num300: int
+    num100: int
+    num50: int
+    num_geki: int
+    num_katu: int
+    num_miss: int
+    acc: float
+    perfect: bool
+    passed: bool
 
 
 class MpMatchesRepository:
@@ -382,3 +506,121 @@ class MpMatchesRepository:
         select_stmt = select_stmt.order_by(MpMatchGamesTable.id.desc()).limit(limit)
         rows = await self._database.fetch_all(select_stmt)
         return [self._deserialize_game(row) for row in rows]
+
+    def _deserialize_game_score(self, row: MySQLRow) -> MpMatchGameScore:
+        return MpMatchGameScore(
+            id=row["id"],
+            game_id=row["game_id"],
+            user_id=row["user_id"],
+            team=row["team"],
+            mods=row["mods"],
+            score=row["score"],
+            max_combo=row["max_combo"],
+            num300=row["num300"],
+            num100=row["num100"],
+            num50=row["num50"],
+            num_geki=row["num_geki"],
+            num_katu=row["num_katu"],
+            num_miss=row["num_miss"],
+            acc=row["acc"],
+            perfect=bool(row["perfect"]),
+            passed=bool(row["passed"]),
+            placement=row["placement"],
+            created_at=row["created_at"],
+        )
+
+    @staticmethod
+    def _ranked_scores(
+        scores: list[MpMatchGameScoreInput],
+        *,
+        win_condition: int,
+    ) -> list[tuple[int, MpMatchGameScoreInput]]:
+        """Assign each score a 1-based placement under the game's win condition.
+
+        A player who passed always outranks one who failed; within each group the
+        ordering is by the win-condition metric, highest first (accuracy for the
+        accuracy condition, combo for combo, otherwise raw score -- score_v2 is
+        still ranked on the score field the client sends). Ties share neither a
+        placement nor an order beyond this; the sort is stable, so equal scores
+        keep their input order and each still gets a distinct, increasing number.
+        """
+
+        def metric(s: MpMatchGameScoreInput) -> float:
+            if win_condition == 1:  # accuracy
+                return s.acc
+            elif win_condition == 2:  # combo
+                return s.max_combo
+            else:  # score / scorev2
+                return s.score
+
+        ordered = sorted(scores, key=lambda s: (s.passed, metric(s)), reverse=True)
+        return [(i + 1, s) for i, s in enumerate(ordered)]
+
+    async def record_game_scores(
+        self,
+        *,
+        game_id: int,
+        win_condition: int,
+        scores: list[MpMatchGameScoreInput],
+    ) -> int:
+        """Persist a completed game's per-player scoreboard; return rows written.
+
+        Placement is computed here, across the whole set, so a scoreboard is
+        stored already ranked and needs no re-sort on read. An empty ``scores``
+        list is a no-op (no participant sent a usable frame) and writes nothing.
+        """
+        if not scores:
+            return 0
+
+        rows: list[MySQLParams] = [
+            {
+                "game_id": game_id,
+                "user_id": s.user_id,
+                "team": s.team,
+                "mods": s.mods,
+                "score": s.score,
+                "max_combo": s.max_combo,
+                "num300": s.num300,
+                "num100": s.num100,
+                "num50": s.num50,
+                "num_geki": s.num_geki,
+                "num_katu": s.num_katu,
+                "num_miss": s.num_miss,
+                "acc": s.acc,
+                "perfect": s.perfect,
+                "passed": s.passed,
+                "placement": placement,
+            }
+            for placement, s in self._ranked_scores(
+                scores,
+                win_condition=win_condition,
+            )
+        ]
+        await self._database.execute_many(
+            "INSERT INTO mp_match_game_scores ("
+            "game_id, user_id, team, mods, score, max_combo, "
+            "num300, num100, num50, num_geki, num_katu, num_miss, "
+            "acc, perfect, passed, placement"
+            ") VALUES ("
+            ":game_id, :user_id, :team, :mods, :score, :max_combo, "
+            ":num300, :num100, :num50, :num_geki, :num_katu, :num_miss, "
+            ":acc, :perfect, :passed, :placement"
+            ")",
+            rows,
+        )
+        return len(rows)
+
+    async def fetch_scores_for_game(self, game_id: int) -> list[MpMatchGameScore]:
+        """A completed game's scoreboard, ordered by finishing placement.
+
+        Served by the ``(game_id, placement)`` index in one scan. Returns ``[]``
+        for a game with no recorded scores (older games, or a game where no
+        participant sent a usable frame) -- an empty scoreboard, not an error.
+        """
+        select_stmt = (
+            select(*GAME_SCORE_READ_PARAMS)
+            .where(MpMatchGameScoresTable.game_id == game_id)
+            .order_by(MpMatchGameScoresTable.placement.asc())
+        )
+        rows = await self._database.fetch_all(select_stmt)
+        return [self._deserialize_game_score(row) for row in rows]

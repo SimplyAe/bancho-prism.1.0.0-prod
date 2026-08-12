@@ -23,8 +23,43 @@ from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
 
+import app.packets
+from app.packets import ScoreFrame
 from app.repositories.mp_matches import MpMatch
+from app.repositories.mp_matches import MpMatchGameScoreInput
 from app.services.multiplayer import match_history
+from app.services.multiplayer.match_history import ParticipantScoreFrame
+
+
+def _raw_frame(
+    *,
+    total_score: int = 0,
+    max_combo: int = 0,
+    num300: int = 0,
+    num100: int = 0,
+    num50: int = 0,
+    num_miss: int = 0,
+    score_v2: bool = False,
+) -> bytes:
+    """A raw MATCH_SCORE_UPDATE frame body, as stashed on a slot."""
+    sf = ScoreFrame(
+        time=0,
+        id=0,
+        num300=num300,
+        num100=num100,
+        num50=num50,
+        num_geki=0,
+        num_katu=0,
+        num_miss=num_miss,
+        total_score=total_score,
+        current_combo=0,
+        max_combo=max_combo,
+        perfect=False,
+        current_hp=0,
+        tag_byte=0,
+        score_v2=score_v2,
+    )
+    return app.packets.write_scoreframe(sf)
 
 
 class _FakeStore:
@@ -36,12 +71,15 @@ class _FakeStore:
         raise_on_create: bool = False,
         raise_on_game: bool = False,
         raise_on_disband: bool = False,
+        raise_on_scores: bool = False,
     ) -> None:
         self._raise_on_create = raise_on_create
         self._raise_on_game = raise_on_game
         self._raise_on_disband = raise_on_disband
+        self._raise_on_scores = raise_on_scores
         self.created: list[dict[str, Any]] = []
         self.games: list[dict[str, Any]] = []
+        self.scoreboards: list[dict[str, Any]] = []
         self.disbanded: list[int] = []
         self._next_id = 100
 
@@ -55,7 +93,11 @@ class _FakeStore:
         if self._raise_on_create:
             raise RuntimeError("db down")
         self.created.append(
-            {"name": name, "host_id": host_id, "has_public_history": has_public_history},
+            {
+                "name": name,
+                "host_id": host_id,
+                "has_public_history": has_public_history,
+            },
         )
         match_id = self._next_id
         self._next_id += 1
@@ -72,7 +114,22 @@ class _FakeStore:
         if self._raise_on_game:
             raise RuntimeError("db down")
         self.games.append(kwargs)
-        return SimpleNamespace(id=1, **kwargs)
+        # a stable game id so the scoreboard write has something to key to.
+        return SimpleNamespace(id=555, **kwargs)
+
+    async def record_game_scores(
+        self,
+        *,
+        game_id: int,
+        win_condition: int,
+        scores: list[MpMatchGameScoreInput],
+    ) -> int:
+        if self._raise_on_scores:
+            raise RuntimeError("db down")
+        self.scoreboards.append(
+            {"game_id": game_id, "win_condition": win_condition, "scores": scores},
+        )
+        return len(scores)
 
     async def mark_disbanded(self, match_id: int) -> None:
         if self._raise_on_disband:
@@ -197,6 +254,185 @@ async def test_persist_game_completed_swallows_a_write_failure() -> None:
     )
 
     assert store.games == []
+
+
+# --- game completed: per-player scoreboard ---------------------------------
+
+
+async def test_persist_game_completed_records_the_scoreboard() -> None:
+    store = _FakeStore()
+
+    await match_history.persist_game_completed(
+        store,  # type: ignore[arg-type]
+        match_db_id=100,
+        map_md5="a" * 32,
+        map_id=42,
+        map_name="map",
+        mode=0,
+        mods=0,
+        win_condition=0,
+        team_type=0,
+        freemods=False,
+        scrim=False,
+        participants=[4, 5],
+        score_frames=[
+            ParticipantScoreFrame(
+                user_id=4,
+                team=0,
+                mods=0,
+                passed=True,
+                raw_frame=_raw_frame(total_score=800_000, num300=300),
+            ),
+            ParticipantScoreFrame(
+                user_id=5,
+                team=0,
+                mods=64,
+                passed=True,
+                raw_frame=_raw_frame(total_score=500_000, num300=200, num100=50),
+            ),
+        ],
+    )
+
+    assert len(store.scoreboards) == 1
+    board = store.scoreboards[0]
+    # the scoreboard is keyed to the game the store just recorded, and carries
+    # the game's win condition through for placement.
+    assert board["game_id"] == 555
+    assert board["win_condition"] == 0
+    decoded = {s.user_id: s for s in board["scores"]}
+    assert decoded[4].score == 800_000
+    assert decoded[5].mods == 64
+    # accuracy is computed from the decoded frame (all 300s -> 100%).
+    assert decoded[4].acc == 100.0
+
+
+async def test_persist_game_completed_without_frames_writes_no_scoreboard() -> None:
+    store = _FakeStore()
+
+    await match_history.persist_game_completed(
+        store,  # type: ignore[arg-type]
+        match_db_id=100,
+        map_md5="a" * 32,
+        map_id=42,
+        map_name="map",
+        mode=0,
+        mods=0,
+        win_condition=0,
+        team_type=0,
+        freemods=False,
+        scrim=False,
+        participants=[4],
+    )
+
+    # the game still lands; there is simply no scoreboard to write.
+    assert len(store.games) == 1
+    assert store.scoreboards == []
+
+
+async def test_persist_game_completed_drops_undecodable_frames() -> None:
+    store = _FakeStore()
+
+    await match_history.persist_game_completed(
+        store,  # type: ignore[arg-type]
+        match_db_id=100,
+        map_md5="a" * 32,
+        map_id=42,
+        map_name="map",
+        mode=0,
+        mods=0,
+        win_condition=0,
+        team_type=0,
+        freemods=False,
+        scrim=False,
+        participants=[4, 5],
+        score_frames=[
+            ParticipantScoreFrame(
+                user_id=4,
+                team=0,
+                mods=0,
+                passed=True,
+                raw_frame=_raw_frame(total_score=800_000),
+            ),
+            # a truncated frame decodes to None -> that participant is dropped.
+            ParticipantScoreFrame(
+                user_id=5,
+                team=0,
+                mods=0,
+                passed=True,
+                raw_frame=b"\x00\x00\x00",
+            ),
+        ],
+    )
+
+    board = store.scoreboards[0]
+    assert [s.user_id for s in board["scores"]] == [4]
+
+
+async def test_persist_game_completed_all_frames_undecodable_writes_no_scoreboard() -> (
+    None
+):
+    store = _FakeStore()
+
+    await match_history.persist_game_completed(
+        store,  # type: ignore[arg-type]
+        match_db_id=100,
+        map_md5="a" * 32,
+        map_id=42,
+        map_name="map",
+        mode=0,
+        mods=0,
+        win_condition=0,
+        team_type=0,
+        freemods=False,
+        scrim=False,
+        participants=[5],
+        score_frames=[
+            ParticipantScoreFrame(
+                user_id=5,
+                team=0,
+                mods=0,
+                passed=True,
+                raw_frame=b"\x00",
+            ),
+        ],
+    )
+
+    # nothing decodable -> the game lands, but no empty scoreboard is written.
+    assert len(store.games) == 1
+    assert store.scoreboards == []
+
+
+async def test_persist_game_completed_swallows_a_scoreboard_write_failure() -> None:
+    store = _FakeStore(raise_on_scores=True)
+
+    # a scoreboard write failure must not raise into the completion handler; the
+    # game write already succeeded and the clients have been told.
+    await match_history.persist_game_completed(
+        store,  # type: ignore[arg-type]
+        match_db_id=100,
+        map_md5="a" * 32,
+        map_id=42,
+        map_name="map",
+        mode=0,
+        mods=0,
+        win_condition=0,
+        team_type=0,
+        freemods=False,
+        scrim=False,
+        participants=[4],
+        score_frames=[
+            ParticipantScoreFrame(
+                user_id=4,
+                team=0,
+                mods=0,
+                passed=True,
+                raw_frame=_raw_frame(total_score=800_000),
+            ),
+        ],
+    )
+
+    assert len(store.games) == 1
+    assert store.scoreboards == []
 
 
 # --- disbanded -------------------------------------------------------------

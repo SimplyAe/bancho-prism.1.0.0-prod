@@ -732,6 +732,72 @@ def decode_scoreframe(raw: bytes | memoryview) -> ScoreFrame | None:
     return sf
 
 
+def scoreframe_accuracy(sf: ScoreFrame, mode_vn: int) -> float:
+    """Accuracy (0-100) of a decoded scoreframe for a vanilla mode (0-3).
+
+    Mirrors ``app.objects.score.Score.calculate_accuracy`` but works off the
+    hit counts carried in a live multiplayer scoreframe, so a completed game's
+    per-player scoreboard can record accuracy without a submitted ``scores`` row
+    (a multiplayer frame is not a solo submission). ``mode_vn`` is the vanilla
+    mode (``GameMode.as_vanilla``); score_v2 mania accuracy uses the frame's own
+    ``score_v2`` flag. An empty frame (no judgements) is ``0.0``.
+    """
+    if mode_vn == 0:  # osu!
+        total = sf.num300 + sf.num100 + sf.num50 + sf.num_miss
+        if total == 0:
+            return 0.0
+        return (
+            100.0
+            * ((sf.num300 * 300.0) + (sf.num100 * 100.0) + (sf.num50 * 50.0))
+            / (total * 300.0)
+        )
+
+    elif mode_vn == 1:  # osu!taiko
+        total = sf.num300 + sf.num100 + sf.num_miss
+        if total == 0:
+            return 0.0
+        return 100.0 * ((sf.num100 * 0.5) + sf.num300) / total
+
+    elif mode_vn == 2:  # osu!catch
+        total = sf.num300 + sf.num100 + sf.num50 + sf.num_katu + sf.num_miss
+        if total == 0:
+            return 0.0
+        return 100.0 * (sf.num300 + sf.num100 + sf.num50) / total
+
+    elif mode_vn == 3:  # osu!mania
+        total = (
+            sf.num300 + sf.num100 + sf.num50 + sf.num_geki + sf.num_katu + sf.num_miss
+        )
+        if total == 0:
+            return 0.0
+
+        if sf.score_v2:
+            return (
+                100.0
+                * (
+                    (sf.num50 * 50.0)
+                    + (sf.num100 * 100.0)
+                    + (sf.num_katu * 200.0)
+                    + (sf.num300 * 300.0)
+                    + (sf.num_geki * 305.0)
+                )
+                / (total * 305.0)
+            )
+
+        return (
+            100.0
+            * (
+                (sf.num50 * 50.0)
+                + (sf.num100 * 100.0)
+                + (sf.num_katu * 200.0)
+                + ((sf.num300 + sf.num_geki) * 300.0)
+            )
+            / (total * 300.0)
+        )
+    else:
+        raise ValueError(f"Invalid vanilla mode {mode_vn}")
+
+
 _noexpand_types: dict[osuTypes, Callable[..., bytes | bytearray]] = {
     # base
     osuTypes.i8: struct.Struct("<b").pack,

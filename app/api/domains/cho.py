@@ -66,6 +66,7 @@ from app.packets import ClientPackets
 from app.packets import LoginFailureReason
 from app.repositories.legacy import get_legacy_repositories
 from app.services.bancho import BanchoLoginService
+from app.services.multiplayer.match_history import ParticipantScoreFrame
 from app.services.multiplayer.match_history import persist_game_completed
 from app.services.multiplayer.match_history import persist_match_created
 from app.services.performance import PerformanceService
@@ -1806,6 +1807,33 @@ class MatchComplete(BasePacket):
         # not disturb the completion the clients have already been told about.
         match = player.match
         participant_ids = [s.player.id for s in was_playing if s.player is not None]
+
+        # snapshot each participant's final score frame for the per-player
+        # scoreboard. The raw frame is the last MATCH_SCORE_UPDATE stashed on the
+        # slot; a slot that never sent one (e.g. never scored) is skipped. When
+        # freemods is on the effective mods are the match mods OR the slot's own
+        # mods, matching how the client applies them; otherwise the match mods.
+        score_frames: list[ParticipantScoreFrame] = []
+        for s in was_playing:
+            if s.player is None or s.last_score_frame is None:
+                continue
+            effective_mods = (
+                int(match.mods | s.mods)
+                if match.freemods
+                else int(
+                    match.mods,
+                )
+            )
+            score_frames.append(
+                ParticipantScoreFrame(
+                    user_id=s.player.id,
+                    team=int(s.team),
+                    mods=effective_mods,
+                    passed=s.passed,
+                    raw_frame=s.last_score_frame,
+                ),
+            )
+
         _ = spawn_background_task(
             persist_game_completed(
                 get_legacy_repositories().mp_matches,
@@ -1821,6 +1849,7 @@ class MatchComplete(BasePacket):
                 scrim=match.is_scrimming,
                 participants=participant_ids,
                 started_at=match.current_game_started_at,
+                score_frames=score_frames,
             ),
             name="persist-match-game",
         )
