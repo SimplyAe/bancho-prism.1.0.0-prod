@@ -42,6 +42,7 @@ from app.repositories.relationships import RelationshipsRepository
 from app.repositories.replay_analysis_queue import ReplayAnalysisQueue
 from app.repositories.score_replay_stats import ScoreReplayStatsRepository
 from app.repositories.scores import ScoresRepository
+from app.repositories.spectator_sessions import SpectatorSessionsRepository
 from app.repositories.stat_snapshots import StatSnapshotsRepository
 from app.repositories.stats import StatsRepository
 from app.repositories.tourney_pool_maps import TourneyPoolMapsRepository
@@ -82,6 +83,7 @@ from app.services.scores import ScoresService
 from app.services.screenshots import ScreenshotService
 from app.services.social.activity_feed import ActivityFeedService
 from app.services.social.activity_producers import publish_score_submission_activity
+from app.services.spectator.spectator_history_reader import SpectatorHistoryService
 from app.services.stat_snapshots import StatSnapshotService
 from app.services.tourney_pools import TourneyPoolsService
 from app.services.web_sessions import WebSessionsService
@@ -263,6 +265,10 @@ def get_relationships_repository() -> RelationshipsRepository:
 
 def get_scores_repository() -> ScoresRepository:
     return ScoresRepository(app.state.services.database)
+
+
+def get_spectator_sessions_repository() -> SpectatorSessionsRepository:
+    return SpectatorSessionsRepository(app.state.services.database)
 
 
 def get_stats_repository() -> StatsRepository:
@@ -703,3 +709,12 @@ def get_match_history_service(
     ],
 ) -> MatchHistoryService:
     return MatchHistoryService(matches=mp_matches)
+
+
+def get_spectator_history_service(
+    spectator_sessions: Annotated[
+        SpectatorSessionsRepository,
+        Depends(get_spectator_sessions_repository),
+    ],
+) -> SpectatorHistoryService:
+    return SpectatorHistoryService(sessions=spectator_sessions)

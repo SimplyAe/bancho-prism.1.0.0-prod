@@ -18,6 +18,7 @@ from app.repositories.maps import MapsRepository
 from app.repositories.mp_matches import MpMatchesRepository
 from app.repositories.ratings import RatingsRepository
 from app.repositories.scores import ScoresRepository
+from app.repositories.spectator_sessions import SpectatorSessionsRepository
 from app.repositories.stats import StatsRepository
 from app.repositories.tourney_pool_maps import TourneyPoolMapsRepository
 from app.repositories.tourney_pools import TourneyPoolsRepository
@@ -44,6 +45,7 @@ class LegacyRepositories:
     mp_matches: MpMatchesRepository
     ratings: RatingsRepository
     scores: ScoresRepository
+    spectator_sessions: SpectatorSessionsRepository
     stats: StatsRepository
     tourney_pool_maps: TourneyPoolMapsRepository
     tourney_pools: TourneyPoolsRepository
@@ -70,6 +72,7 @@ def get_legacy_repositories() -> LegacyRepositories:
         mp_matches=MpMatchesRepository(database),
         ratings=RatingsRepository(database),
         scores=ScoresRepository(database),
+        spectator_sessions=SpectatorSessionsRepository(database),
         stats=StatsRepository(database),
         tourney_pool_maps=TourneyPoolMapsRepository(database),
         tourney_pools=TourneyPoolsRepository(database),

@@ -34,6 +34,8 @@ from app.objects.score import Grade
 from app.objects.score import Score
 from app.repositories.legacy import get_legacy_repositories
 from app.services.multiplayer.match_history import persist_match_disbanded
+from app.services.spectator.spectator_history import persist_spectator_ended
+from app.services.spectator.spectator_history import persist_spectator_started
 from app.utils import escape_enum
 from app.utils import make_safe_name
 from app.utils import pymysql_encode
@@ -277,6 +279,11 @@ class Player:
         self.channels: list[Channel] = []
         self.spectators: list[Player] = []
         self.spectating: Player | None = None
+        # The durable `spectator_sessions.id` of this player's own open spectate
+        # session (they are spectating someone), or None when not spectating or
+        # when the open row failed to land. Stashed so the close can stamp the
+        # matching `ended_at`; mirrors `Match.db_id` for multiplayer history.
+        self.spectating_session_db_id: int | None = None
         self.match: Match | None = None
         self.stealth = False
 
@@ -811,10 +818,41 @@ class Player:
 
         log(f"{player} is now spectating {self}.")
 
+        # persist the durable spectator-session record (Prism); fire-and-forget
+        # so spectating is usable immediately and a history-write failure never
+        # blocks or breaks it. The producer hands the durable id back onto the
+        # spectating player so its matching close can stamp `ended_at`.
+        def _stash_session_db_id(session_db_id: int) -> None:
+            player.spectating_session_db_id = session_db_id
+
+        _ = spawn_background_task(
+            persist_spectator_started(
+                get_legacy_repositories().spectator_sessions,
+                _stash_session_db_id,
+                host_id=self.id,
+                spectator_id=player.id,
+            ),
+            name="persist-spectator-started",
+        )
+
     def remove_spectator(self, player: Player) -> None:
         """Attempt to remove `player` from `self`'s spectators."""
         self.spectators.remove(player)
         player.spectating = None
+
+        # close the durable spectator-session record (Prism). Capture and clear
+        # the stashed id first, so the fire-and-forget close targets this exact
+        # session and a later re-spectate cannot double-close it; a no-op if the
+        # open row never landed (id is None).
+        session_db_id = player.spectating_session_db_id
+        player.spectating_session_db_id = None
+        _ = spawn_background_task(
+            persist_spectator_ended(
+                get_legacy_repositories().spectator_sessions,
+                session_db_id=session_db_id,
+            ),
+            name="persist-spectator-ended",
+        )
 
         channel = app.state.sessions.channels.get_by_name(f"#spec_{self.id}")
         assert channel is not None

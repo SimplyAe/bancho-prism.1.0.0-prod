@@ -454,6 +454,22 @@ create index mp_match_game_scores_game_id_placement_index
 create index mp_match_game_scores_user_id_index
 	on mp_match_game_scores (user_id);
 
+create table spectator_sessions
+(
+	id bigint auto_increment
+		primary key,
+	host_id int not null,
+	spectator_id int not null,
+	started_at datetime default current_timestamp not null,
+	ended_at datetime null
+);
+create index spectator_sessions_host_id_id_index
+	on spectator_sessions (host_id, id);
+create index spectator_sessions_spectator_id_id_index
+	on spectator_sessions (spectator_id, id);
+create index spectator_sessions_started_at_index
+	on spectator_sessions (started_at);
+
 create table stats
 (
 	id int auto_increment,

@@ -728,3 +728,38 @@ create index mp_match_game_scores_game_id_placement_index
 	on mp_match_game_scores (game_id, placement);
 create index mp_match_game_scores_user_id_index
 	on mp_match_game_scores (user_id);
+
+# v5.3.7
+# Prism social: durable spectator-session history (Track 4). osu! spectating is
+# a purely in-memory relationship in stock bancho.py -- `Player.spectators` and
+# `Player.spectating` (app/objects/player.py) live only for the length of a
+# connection and are gone on logout or restart, so "who watched whom, and for
+# how long" has no record. This table is that record: one row per spectate
+# session, opened when a viewer starts spectating a host and closed when they
+# stop (or log out, which stops it for them).
+#
+# `host_id` is the player being watched, `spectator_id` the one watching;
+# `started_at` is stamped at START_SPECTATING, `ended_at` at STOP_SPECTATING /
+# logout. A row with a null `ended_at` is a session that was still open when the
+# server last ran -- like `mp_matches.disbanded_at`, it is simply never stamped
+# if the process died mid-session rather than being back-filled.
+#
+# As elsewhere the foreign keys (host_id -> users, spectator_id -> users) are
+# enforced in application logic, not the DB, so a purged player orphans rather
+# than cascades. Its own version block so a DB already at 5.3.6 picks this up on
+# the next run.
+create table spectator_sessions
+(
+	id bigint auto_increment
+		primary key,
+	host_id int not null,
+	spectator_id int not null,
+	started_at datetime default current_timestamp not null,
+	ended_at datetime null
+);
+create index spectator_sessions_host_id_id_index
+	on spectator_sessions (host_id, id);
+create index spectator_sessions_spectator_id_id_index
+	on spectator_sessions (spectator_id, id);
+create index spectator_sessions_started_at_index
+	on spectator_sessions (started_at);
