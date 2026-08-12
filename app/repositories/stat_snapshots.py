@@ -35,8 +35,10 @@ from sqlalchemy import DateTime
 from sqlalchemy import Index
 from sqlalchemy import Integer
 from sqlalchemy import UniqueConstraint
+from sqlalchemy import and_
 from sqlalchemy import func
 from sqlalchemy import literal
+from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy.dialects.mysql import FLOAT
 from sqlalchemy.dialects.mysql import TINYINT
@@ -140,6 +142,26 @@ class StatSnapshot:
     created_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class SnapshotPeakChange:
+    """A player whose latest snapshot set a new best-ever pp and/or rank.
+
+    Emitted by :meth:`StatSnapshotsRepository.fetch_new_peaks` for the day's
+    capture: ``new_*`` are that day's values, ``prior_best_*`` are the best the
+    player had ever held *before* that day (``prior_best_rank`` is ``None`` if the
+    player had never been ranked before). The row is only returned when at least
+    one of pp or rank is a genuine new peak; the consumer re-checks each condition
+    to decide which feed event(s) to publish.
+    """
+
+    user_id: int
+    mode: int
+    new_pp: int
+    prior_best_pp: int
+    new_rank: int | None
+    prior_best_rank: int | None
+
+
 class StatSnapshotsRepository:
     def __init__(self, database: Database) -> None:
         self._database = database
@@ -232,6 +254,94 @@ class StatSnapshotsRepository:
         insert_stmt = insert_stmt.prefix_with("IGNORE")
 
         return await self._database.execute(insert_stmt)
+
+    async def fetch_new_peaks(
+        self,
+        *,
+        mode: int,
+        snapshot_date: date,
+    ) -> list[SnapshotPeakChange]:
+        """Players whose ``snapshot_date`` snapshot set a new best-ever pp/rank.
+
+        The day-over-day diff the daily capture cannot produce on its own (it is
+        a set-based ``INSERT ... SELECT`` that returns only a row count). For each
+        player who has a snapshot on ``snapshot_date``, this compares it against
+        the aggregate of *all their prior* snapshots for the mode -- the best pp
+        and best (lowest) global rank they had ever held before that day -- and
+        returns only those who beat one or both.
+
+        The comparison is against the best-ever prior value, not merely
+        yesterday's, on purpose: a "new record" should fire once when a player
+        actually surpasses their peak, not every day they wobble back up toward a
+        peak they already hit. An ``INNER JOIN`` on the prior aggregate means a
+        player with no earlier snapshot (their first-ever capture) is excluded
+        entirely -- there is no record to break yet -- so a fresh install's first
+        run publishes nothing rather than flooding the feed. Restricted players
+        never receive a snapshot row (the capture's ranked predicate excludes
+        them), so they cannot appear here either.
+
+        ``prior_best_rank`` is ``None`` when the player had prior snapshots but was
+        never ranked in them (all ``global_rank`` NULL); becoming ranked for the
+        first time then counts as a rank peak. A NULL rank today never counts as a
+        new rank peak (you cannot peak by falling off the leaderboard).
+        """
+        today = (
+            select(*READ_PARAMS)
+            .where(StatSnapshotsTable.mode == mode)
+            .where(StatSnapshotsTable.snapshot_date == snapshot_date)
+            .subquery("today")
+        )
+        prior = (
+            select(
+                StatSnapshotsTable.user_id.label("user_id"),
+                func.max(StatSnapshotsTable.pp).label("prior_best_pp"),
+                func.min(StatSnapshotsTable.global_rank).label("prior_best_rank"),
+            )
+            .where(StatSnapshotsTable.mode == mode)
+            .where(StatSnapshotsTable.snapshot_date < snapshot_date)
+            .group_by(StatSnapshotsTable.user_id)
+            .subquery("prior")
+        )
+
+        new_pp = today.c.pp
+        prior_best_pp = prior.c.prior_best_pp
+        new_rank = today.c.global_rank
+        prior_best_rank = prior.c.prior_best_rank
+
+        pp_is_peak = new_pp > prior_best_pp
+        # a lower rank number is better; becoming ranked (prior best is NULL) for
+        # the first time is also a peak. today's NULL rank can never be a peak.
+        rank_is_peak = and_(
+            new_rank.is_not(None),
+            or_(prior_best_rank.is_(None), new_rank < prior_best_rank),
+        )
+
+        select_stmt = (
+            select(
+                today.c.user_id.label("user_id"),
+                new_pp.label("new_pp"),
+                prior_best_pp.label("prior_best_pp"),
+                new_rank.label("new_rank"),
+                prior_best_rank.label("prior_best_rank"),
+            )
+            .select_from(
+                today.join(prior, prior.c.user_id == today.c.user_id),
+            )
+            .where(or_(pp_is_peak, rank_is_peak))
+        )
+
+        rows = await self._database.fetch_all(select_stmt)
+        return [
+            SnapshotPeakChange(
+                user_id=row["user_id"],
+                mode=mode,
+                new_pp=row["new_pp"],
+                prior_best_pp=row["prior_best_pp"],
+                new_rank=row["new_rank"],
+                prior_best_rank=row["prior_best_rank"],
+            )
+            for row in rows
+        ]
 
     async def record(
         self,

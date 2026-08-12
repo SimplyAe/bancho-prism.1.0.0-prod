@@ -11,10 +11,15 @@ import app.packets
 import app.settings
 import app.state
 from app.bg_task_supervision import run_supervised_loop
+from app.bg_task_supervision import spawn_background_task
 from app.constants.privileges import Privileges
 from app.logging import Ansi
 from app.logging import log
+from app.repositories.activity_events import ActivityEventsRepository
+from app.repositories.relationships import RelationshipsRepository
 from app.repositories.stat_snapshots import StatSnapshotsRepository
+from app.services.social.activity_feed import ActivityFeedService
+from app.services.social.snapshot_producers import publish_snapshot_peak_activity
 from app.services.stat_snapshots import StatSnapshotService
 
 OSU_CLIENT_MIN_PING_INTERVAL = 300000 // 1000  # defined by osu!
@@ -85,6 +90,25 @@ async def _capture_stat_snapshots() -> None:
     # distinct from the loop's iteration counter: this exposes whether the
     # capture actually wrote anything, so a silently-empty capture is visible.
     app.metrics.set_stat_snapshot_rows_written(result.rows_written)
+
+    # off the capture: publish the rank_up / pp_record feed events the day's
+    # snapshot implies (the day-over-day peaks the set-based capture cannot see).
+    # fire-and-forget and gated on rows_written, so a same-day re-run's no-op
+    # capture re-announces nothing, and a failing feed write never disturbs the
+    # (already durable) snapshot rows.
+    feed_service = ActivityFeedService(
+        events=ActivityEventsRepository(app.state.services.database),
+        relationships=RelationshipsRepository(app.state.services.database),
+    )
+    _ = spawn_background_task(
+        publish_snapshot_peak_activity(
+            feed_service,
+            StatSnapshotsRepository(app.state.services.database).fetch_new_peaks,
+            snapshot_date=result.snapshot_date,
+            rows_written=result.rows_written,
+        ),
+        name="publish-snapshot-activity",
+    )
 
 
 def _utc_today() -> date:

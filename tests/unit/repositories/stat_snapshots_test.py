@@ -374,3 +374,97 @@ async def test_capture_mode_returns_the_rows_inserted() -> None:
     inserted = await repository.capture_mode(mode=0, snapshot_date=date(2026, 8, 11))
 
     assert inserted == 0
+
+
+class _CapturingSelectDatabase:
+    """Records the last SELECT it was handed and returns canned rows.
+
+    ``fetch_new_peaks`` builds a subquery/join/group-by SELECT the flat
+    interpreting fake cannot walk, so -- exactly as ``capture_mode`` is tested --
+    its SQL is asserted at the dialect level, while the deserialisation of the
+    result rows is pinned against a canned response.
+    """
+
+    def __init__(self, rows: list[dict[str, Any]] | None = None) -> None:
+        self.last_statement: Any = None
+        self._rows = rows or []
+
+    async def fetch_all(self, statement: Any) -> list[dict[str, Any]]:
+        self.last_statement = statement
+        return self._rows
+
+
+def _new_peaks_sql(database: _CapturingSelectDatabase) -> str:
+    return str(
+        database.last_statement.compile(
+            dialect=mysql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        ),
+    ).lower()
+
+
+async def test_fetch_new_peaks_compares_today_against_the_prior_best() -> None:
+    database = _CapturingSelectDatabase()
+    repository = StatSnapshotsRepository(database)  # type: ignore[arg-type]
+
+    await repository.fetch_new_peaks(mode=0, snapshot_date=date(2026, 8, 12))
+
+    sql = _new_peaks_sql(database)
+
+    # today's snapshot for the mode/day...
+    assert "stat_snapshots.snapshot_date = '2026-08-12'" in sql
+    # ...joined against an aggregate of each player's *prior* snapshots:
+    # best pp is the max, best rank is the min (lower rank number is better).
+    assert "max(stat_snapshots.pp)" in sql
+    assert "min(stat_snapshots.global_rank)" in sql
+    assert "stat_snapshots.snapshot_date < '2026-08-12'" in sql
+    assert "group by stat_snapshots.user_id" in sql
+    # an INNER join, so a player with no prior history is excluded (no day-one
+    # flood) rather than treated as an all-time record.
+    assert ") as today inner join (" in sql
+    assert "on prior.user_id = today.user_id" in sql
+    assert "left outer join" not in sql
+    # returned only when pp OR rank is a new peak.
+    assert "today.pp > prior.prior_best_pp or " in sql
+
+
+async def test_fetch_new_peaks_filters_to_the_requested_mode() -> None:
+    database = _CapturingSelectDatabase()
+    repository = StatSnapshotsRepository(database)  # type: ignore[arg-type]
+
+    await repository.fetch_new_peaks(mode=3, snapshot_date=date(2026, 8, 12))
+
+    sql = _new_peaks_sql(database)
+    # both the today side and the prior-aggregate side are scoped to the mode.
+    assert sql.count("stat_snapshots.mode = 3") == 2
+
+
+async def test_fetch_new_peaks_deserialises_the_result_rows() -> None:
+    database = _CapturingSelectDatabase(
+        rows=[
+            {
+                "user_id": 7,
+                "new_pp": 4200,
+                "prior_best_pp": 4000,
+                "new_rank": 12,
+                "prior_best_rank": 20,
+            },
+            {
+                "user_id": 9,
+                "new_pp": 900,
+                "prior_best_pp": 900,  # pp unchanged; this row is a rank peak
+                "new_rank": 50,
+                "prior_best_rank": None,  # newly ranked
+            },
+        ],
+    )
+    repository = StatSnapshotsRepository(database)  # type: ignore[arg-type]
+
+    peaks = await repository.fetch_new_peaks(mode=0, snapshot_date=date(2026, 8, 12))
+
+    assert [p.user_id for p in peaks] == [7, 9]
+    assert peaks[0].mode == 0
+    assert (peaks[0].new_pp, peaks[0].prior_best_pp) == (4200, 4000)
+    assert (peaks[0].new_rank, peaks[0].prior_best_rank) == (12, 20)
+    # a first-ever ranking round-trips a None prior best rank.
+    assert peaks[1].prior_best_rank is None
