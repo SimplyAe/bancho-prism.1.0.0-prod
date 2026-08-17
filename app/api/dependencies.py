@@ -32,6 +32,7 @@ from app.repositories.anticheat_flags import AnticheatFlagsRepository
 from app.repositories.clans import ClansRepository
 from app.repositories.client_hashes import ClientHashesRepository
 from app.repositories.comments import CommentsRepository
+from app.repositories.discord_oauth_state import DiscordOAuthStateRepository
 from app.repositories.favourites import FavouritesRepository
 from app.repositories.ingame_logins import IngameLoginsRepository
 from app.repositories.leaderboard_ranks import LeaderboardRanksRepository
@@ -51,6 +52,7 @@ from app.repositories.stats import StatsRepository
 from app.repositories.tourney_pool_maps import TourneyPoolMapsRepository
 from app.repositories.tourney_pools import TourneyPoolsRepository
 from app.repositories.user_achievements import UserAchievementsRepository
+from app.repositories.user_discord_links import DiscordLinksRepository
 from app.repositories.users import UsersRepository
 from app.repositories.web_sessions import WebSessionsRepository
 from app.services.account_settings import AccountSettingsService
@@ -87,6 +89,7 @@ from app.services.scores import ScoresService
 from app.services.screenshots import ScreenshotService
 from app.services.social.activity_feed import ActivityFeedService
 from app.services.social.activity_producers import publish_score_submission_activity
+from app.services.social.discord_linking import DiscordLinkingService
 from app.services.spectator.spectator_history_reader import SpectatorHistoryService
 from app.services.stat_snapshots import StatSnapshotService
 from app.services.tourney_pools import TourneyPoolsService
@@ -216,6 +219,28 @@ def _generate_web_session_token() -> str:
     return secrets.token_urlsafe(32)
 
 
+async def _post_discord_token_exchange(
+    url: str,
+    data: dict[str, str],
+) -> dict[str, Any]:
+    response = await app.state.services.http_client.post(url, data=data)
+    response.raise_for_status()
+    return cast("dict[str, Any]", response.json())
+
+
+async def _fetch_discord_identity(
+    url: str,
+    headers: dict[str, str],
+) -> dict[str, Any]:
+    response = await app.state.services.http_client.get(url, headers=headers)
+    response.raise_for_status()
+    return cast("dict[str, Any]", response.json())
+
+
+def _generate_oauth_state() -> str:
+    return secrets.token_urlsafe(32)
+
+
 def _utc_today() -> date:
     """The current UTC calendar day for filing a stat snapshot.
 
@@ -243,6 +268,14 @@ def get_client_hashes_repository() -> ClientHashesRepository:
 
 def get_comments_repository() -> CommentsRepository:
     return CommentsRepository(app.state.services.database)
+
+
+def get_discord_links_repository() -> DiscordLinksRepository:
+    return DiscordLinksRepository(app.state.services.database)
+
+
+def get_discord_oauth_state_repository() -> DiscordOAuthStateRepository:
+    return DiscordOAuthStateRepository(app.state.services.redis)
 
 
 def get_favourites_repository() -> FavouritesRepository:
@@ -719,6 +752,28 @@ def get_anticheat_review_service(
     logs: Annotated[LogsRepository, Depends(get_logs_repository)],
 ) -> AnticheatReviewService:
     return AnticheatReviewService(flags=anticheat_flags, logs=logs)
+
+
+def get_discord_linking_service(
+    links: Annotated[
+        DiscordLinksRepository,
+        Depends(get_discord_links_repository),
+    ],
+    oauth_state: Annotated[
+        DiscordOAuthStateRepository,
+        Depends(get_discord_oauth_state_repository),
+    ],
+) -> DiscordLinkingService:
+    return DiscordLinkingService(
+        client_id=settings.DISCORD_OAUTH_CLIENT_ID,
+        client_secret=settings.DISCORD_OAUTH_CLIENT_SECRET,
+        redirect_uri=settings.DISCORD_OAUTH_REDIRECT_URI,
+        links=links,
+        oauth_state=oauth_state,
+        exchange_code=_post_discord_token_exchange,
+        fetch_identity=_fetch_discord_identity,
+        generate_state=_generate_oauth_state,
+    )
 
 
 def get_activity_feed_service(

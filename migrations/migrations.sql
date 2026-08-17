@@ -763,3 +763,26 @@ create index spectator_sessions_spectator_id_id_index
 	on spectator_sessions (spectator_id, id);
 create index spectator_sessions_started_at_index
 	on spectator_sessions (started_at);
+
+# v5.3.8
+# Prism social: Discord account links (Track 4). Ties an osu! account on this
+# server to a Discord account the player proved they own through Discord's OAuth2
+# flow, so the two identities can be surfaced together (and a Discord bot can map
+# either direction). One row per link: `user_id` is the primary key, so a player
+# has at most one Discord account linked; `discord_id` carries a unique index, so
+# a Discord account backs at most one player -- a second attempt to claim an
+# already-linked Discord is refused by the service, never silently reassigned.
+#
+# As elsewhere the foreign key (`user_id` -> users) is enforced in application
+# logic, not the DB, so a purged player orphans rather than cascades. Its own
+# version block so a DB already at 5.3.7 picks this up on the next run.
+create table user_discord_links
+(
+	user_id int not null
+		primary key,
+	discord_id varchar(20) not null,
+	discord_username varchar(32) not null,
+	linked_at datetime default current_timestamp not null
+);
+create unique index user_discord_links_discord_id_uindex
+	on user_discord_links (discord_id);

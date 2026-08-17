@@ -70,6 +70,11 @@ class Settings(BaseSettings):
     DISCORD_AUDIT_LOG_WEBHOOK: str = ""
     DISCORD_FIRST_PLACE_WEBHOOK: str = ""
     DISCORD_INVITE: str = ""
+    # Discord OAuth2 account linking. All three empty = feature disabled; a
+    # partially-filled set is treated as off (see DiscordLinkingService.enabled).
+    DISCORD_OAUTH_CLIENT_ID: str = ""
+    DISCORD_OAUTH_CLIENT_SECRET: str = ""
+    DISCORD_OAUTH_REDIRECT_URI: str = ""
     SENTRY_DSN: str = ""
 
     MENU_ICON_URL: str = ""
@@ -237,6 +242,10 @@ DISCORD_AUDIT_LOG_WEBHOOK = _settings.DISCORD_AUDIT_LOG_WEBHOOK
 DISCORD_FIRST_PLACE_WEBHOOK = _settings.DISCORD_FIRST_PLACE_WEBHOOK
 DISCORD_INVITE = _settings.DISCORD_INVITE
 
+DISCORD_OAUTH_CLIENT_ID = _settings.DISCORD_OAUTH_CLIENT_ID
+DISCORD_OAUTH_CLIENT_SECRET = _settings.DISCORD_OAUTH_CLIENT_SECRET
+DISCORD_OAUTH_REDIRECT_URI = _settings.DISCORD_OAUTH_REDIRECT_URI
+
 SENTRY_DSN = _settings.SENTRY_DSN
 
 AUTOMATICALLY_REPORT_PROBLEMS = _settings.AUTOMATICALLY_REPORT_PROBLEMS
@@ -288,4 +297,3 @@ with open("pyproject.toml", "rb") as f:
 # may carry a non-numeric suffix ("-prod"). Surfaced in the API version header
 # and logs; never parsed as a migration version.
 PRISM_VERSION = "1.0.0-prod"
-

@@ -524,6 +524,25 @@ create table tourney_pools
 create index tourney_pools_users_id_fk
 	on tourney_pools (created_by);
 
+# Prism social: Discord account links (Track 4). Ties an osu! account on this
+# server to a Discord account the player proved they own via OAuth2, so the two
+# identities can be shown together and a Discord bot can map either way. One row
+# per link: `user_id` is the PK, so a player has at most one Discord linked, and
+# `discord_id` is unique, so a Discord account can back at most one player -- the
+# service refuses a second claim rather than silently stealing the link. As with
+# the rest of the schema the foreign key (`user_id` -> users) is enforced in
+# application logic, not the DB, so a purged player orphans rather than cascades.
+create table user_discord_links
+(
+	user_id int not null
+		primary key,
+	discord_id varchar(20) not null,
+	discord_username varchar(32) not null,
+	linked_at datetime default current_timestamp not null
+);
+create unique index user_discord_links_discord_id_uindex
+	on user_discord_links (discord_id);
+
 create table user_achievements
 (
 	userid int not null,
