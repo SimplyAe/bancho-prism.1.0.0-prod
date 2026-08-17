@@ -857,6 +857,20 @@ def _no_activity_publish(submitted: "SubmittedScore") -> None:
     return None
 
 
+def _no_discord_announce(
+    score: Score,
+    previous_first_place_score: "FirstPlaceScore | None",
+) -> None:
+    """Default ``announce_first_place_to_discord``: announce nothing.
+
+    Keeps the Discord #1 feed an opt-in dependency -- a deployment without the
+    webhook configured submits scores exactly as before. The wired implementation
+    spawns a supervised background task, so a webhook post never runs on this
+    latency-sensitive path.
+    """
+    return None
+
+
 @dataclass(frozen=True)
 class ScoreSubmissionService:
     replays_path: Path
@@ -885,6 +899,13 @@ class ScoreSubmissionService:
     # Defaults to a no-op so submission never hard-depends on the feed; the wired
     # implementation spawns a supervised task so no feed write is awaited here.
     publish_activity_events: Callable[[SubmittedScore], None] = _no_activity_publish
+    # fire-and-forget mirror of the in-game #1 announce to a Discord webhook.
+    # Defaults to a no-op so submission never hard-depends on the webhook being
+    # wired; the wired implementation spawns a supervised task so no post is
+    # awaited here.
+    announce_first_place_to_discord: Callable[[Score, FirstPlaceScore | None], None] = (
+        _no_discord_announce
+    )
 
     async def persist_score_submission_stats(
         self,
@@ -1155,6 +1176,14 @@ class ScoreSubmissionService:
                 previous_first_place_score=persistence_result.previous_first_place_score,
                 announce_channel=self.announce_channel,
                 domain=self.domain,
+            )
+            # mirror the same #1 to Discord, off the hot path. The wired hook
+            # spawns a supervised background task, so a slow or failing webhook
+            # post is logged and dropped -- never awaited here, and never able to
+            # affect the already-committed score.
+            self.announce_first_place_to_discord(
+                score,
+                persistence_result.previous_first_place_score,
             )
 
         log(

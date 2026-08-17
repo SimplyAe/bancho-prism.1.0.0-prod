@@ -20,6 +20,8 @@ import app.utils
 from app import settings
 from app import state
 from app.bg_task_supervision import spawn_background_task
+from app.discord import Embed
+from app.discord import Webhook
 from app.objects.beatmap import Beatmap
 from app.objects.beatmap import ensure_osu_file_is_available
 from app.objects.player import Player
@@ -41,6 +43,7 @@ from app.repositories.ratings import RatingsRepository
 from app.repositories.relationships import RelationshipsRepository
 from app.repositories.replay_analysis_queue import ReplayAnalysisQueue
 from app.repositories.score_replay_stats import ScoreReplayStatsRepository
+from app.repositories.scores import FirstPlaceScore
 from app.repositories.scores import ScoresRepository
 from app.repositories.spectator_sessions import SpectatorSessionsRepository
 from app.repositories.stat_snapshots import StatSnapshotsRepository
@@ -63,6 +66,7 @@ from app.services.client_integrity import ClientIntegrityService
 from app.services.comments import CommentsService
 from app.services.direct_search import DirectSearchParams
 from app.services.direct_search import DirectSearchService
+from app.services.discord.first_place_bridge import announce_first_place_to_discord
 from app.services.favourites import FavouritesService
 from app.services.leaderboard_recovery import LeaderboardRecoveryService
 from app.services.mail import MailReadService
@@ -169,6 +173,36 @@ def _publish_activity_events(submitted: SubmittedScore) -> None:
     _ = spawn_background_task(
         publish_score_submission_activity(feed_service, submitted),
         name="publish-activity-events",
+    )
+
+
+async def _post_first_place_embed(embed: Embed) -> None:
+    """Post a single embed to the configured #1-score webhook."""
+    webhook = Webhook(settings.DISCORD_FIRST_PLACE_WEBHOOK, embeds=[embed])
+    await webhook.post()
+
+
+def _announce_first_place_to_discord(
+    score: Score,
+    previous_first_place_score: FirstPlaceScore | None,
+) -> None:
+    """Fire-and-forget mirror of an in-game #1 to a Discord webhook.
+
+    Like ``_publish_activity_events``, this runs off the submission hot path as
+    a supervised background task. Skipped entirely when no webhook is configured,
+    so the default deployment pays nothing; the producer itself swallows and logs
+    any post failure so a bad webhook never touches the committed score.
+    """
+    if not settings.DISCORD_FIRST_PLACE_WEBHOOK:
+        return
+
+    _ = spawn_background_task(
+        announce_first_place_to_discord(
+            _post_first_place_embed,
+            score,
+            previous_first_place_score=previous_first_place_score,
+        ),
+        name="announce-first-place-discord",
     )
 
 
@@ -615,6 +649,7 @@ def get_score_submission_service(
         record_submission_integrity_failure=_record_strange_occurrence_stacktrace,
         schedule_replay_analysis=_schedule_replay_analysis,
         publish_activity_events=_publish_activity_events,
+        announce_first_place_to_discord=_announce_first_place_to_discord,
     )
 
 
