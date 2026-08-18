@@ -59,6 +59,34 @@ class PerformanceResult:
     difficulty: DifficultyRating
 
 
+class BeatmapDifficultyError(ValueError):
+    """A beatmap's ``.osu`` content could not be rated.
+
+    Raised in place of whatever the calculator threw, so a caller rating an
+    uploaded beatmap can map "this file is unusable" onto a rejection instead of
+    letting a third-party exception escape as a 500.
+    """
+
+
+@dataclass(frozen=True)
+class BeatmapDifficultyAttributes:
+    """The two map-level values a ``.osu`` file does not state itself.
+
+    Both are needed to write a ``maps`` row and neither appears in the file:
+    ``stars`` is the star rating, ``max_combo`` the theoretical maximum combo
+    (which sliders and spinners contribute to, so it cannot be counted off the
+    hit-object lines alone).
+    """
+
+    stars: float
+    max_combo: int
+
+
+# `maps.diff` is float(6,3), so a rating beyond this cannot be stored. Clamping
+# (rather than raising) keeps a pathological map submittable but honestly rated.
+_MAX_STORABLE_STARS = 999.999
+
+
 class PerformanceService:
     def calculate_performances(
         self,
@@ -141,3 +169,36 @@ class PerformanceService:
             )
 
         return results
+
+    def calculate_beatmap_difficulty(
+        self,
+        *,
+        osu_file_content: str,
+        mode: int,
+    ) -> BeatmapDifficultyAttributes:
+        """Rate a beatmap straight from its ``.osu`` text.
+
+        Used when hosting an uploaded beatmap: the ``maps`` row needs a star
+        rating and a max combo, and neither is stated in the file. The calculator
+        accepts the content directly, so nothing has to touch the filesystem --
+        the caller can rate a difficulty before deciding to keep it.
+
+        Raises :class:`BeatmapDifficultyError` if the content cannot be rated.
+        """
+        try:
+            calc_bmap = Beatmap(content=osu_file_content)
+            attributes = Calculator(mode=mode).difficulty(calc_bmap)
+            stars = attributes.stars
+            max_combo = attributes.max_combo
+        except Exception as exc:
+            raise BeatmapDifficultyError(f"could not rate beatmap: {exc}") from exc
+
+        # same guard as `calculate_performances` applies to pp: a NaN would be
+        # written to the database and then compared against forever.
+        if math.isnan(stars) or math.isinf(stars):
+            raise BeatmapDifficultyError("beatmap rated as NaN/inf stars")
+
+        return BeatmapDifficultyAttributes(
+            stars=min(round(stars, 3), _MAX_STORABLE_STARS),
+            max_combo=max(int(max_combo), 0),
+        )
