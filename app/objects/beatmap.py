@@ -20,6 +20,7 @@ from app.constants.gamemodes import GameMode
 from app.logging import Ansi
 from app.logging import log
 from app.repositories.legacy import get_legacy_repositories
+from app.repositories.maps import MapServer
 
 # from dataclasses import dataclass
 
@@ -173,6 +174,15 @@ class Beatmap:
         Whether the beatmap's status is to be kept when a newer
         version is found in the osu!api.
         # XXX: This is set when a map's status is manually changed.
+        # XXX: This guards `status` only -- it is NOT a guard against the
+        #      osu!api refresh *deleting* the map. `server` is that guard.
+
+    server: `str`
+        Which server owns the map: `osu!` for maps mirrored from the osu!api,
+        `private` for maps hosted here (uploaded through beatmap submission).
+        The refresh path in `BeatmapSet._update_if_available` deletes maps the
+        osu!api no longer lists, and a privately-hosted map is never listed
+        there, so every read/delete on that path is scoped to `osu!` maps.
     """
 
     def __init__(
@@ -200,6 +210,7 @@ class Beatmap:
         hp: float = 0.0,
         diff: float = 0.0,
         filename: str = "",
+        server: str = MapServer.OSU,
     ) -> None:
         self.set = map_set
 
@@ -225,6 +236,7 @@ class Beatmap:
         self.hp = hp
         self.diff = diff
         self.filename = filename
+        self.server = server
 
     def __repr__(self) -> str:
         return self.full_name
@@ -494,11 +506,13 @@ class BeatmapSet:
         id: int,
         last_osuapi_check: datetime,
         maps: list[Beatmap] | None = None,
+        server: str = MapServer.OSU,
     ) -> None:
         self.id = id
 
         self.maps = maps or []
         self.last_osuapi_check = last_osuapi_check
+        self.server = server
 
     def __repr__(self) -> str:
         map_names = []
@@ -553,6 +567,15 @@ class BeatmapSet:
         """Fetch the newest data from the api, check for differences
         and propogate any update into our cache & database."""
 
+        if self.server != MapServer.OSU:
+            # a privately-hosted set has no upstream to refresh from. Asking the
+            # osu!api about its id returns "no such set" (a 404, or a 200 with an
+            # empty array), which is indistinguishable from "this set was deleted
+            # upstream" -- and the branch below answers that by deleting the maps
+            # *and every score set on them*. So there is nothing to gain here and
+            # a set to lose: leave privately-hosted maps entirely alone.
+            return
+
         try:
             api_data = await api_get_beatmaps(s=self.id)
         except (httpx.TransportError, httpx.DecodingError):
@@ -589,7 +612,14 @@ class BeatmapSet:
             for old_id, old_map in old_maps.items():
                 if old_id not in new_maps:
                     # delete map from old_maps
-                    map_md5s_to_delete.add(old_map.md5)
+                    if old_map.server == MapServer.OSU:
+                        map_md5s_to_delete.add(old_map.md5)
+                    else:
+                        # a privately-hosted map in an osu! set's id range is not
+                        # something the osu!api can vouch for either way; keep it.
+                        # (the SQL predicates below are the second line of defence;
+                        # this one is what protects its *scores*.)
+                        updated_maps.append(old_map)
                 else:
                     new_map = new_maps[old_id]
                     new_ranked_status = RankedStatus.from_osuapi(
@@ -620,6 +650,10 @@ class BeatmapSet:
                     bmap.frozen = False
                     bmap.passes = 0
                     bmap.plays = 0
+                    # `__new__` bypasses `__init__`, so every attribute the object
+                    # needs must be set here; a map the osu!api just handed us is
+                    # by definition an osu!-hosted one.
+                    bmap.server = MapServer.OSU
 
                     bmap.set = self
                     updated_maps.append(bmap)
@@ -631,8 +665,11 @@ class BeatmapSet:
 
             if map_md5s_to_delete:
                 # delete maps
+                # NOTE: scoped to osu!-hosted maps. This path only ever reasons
+                # about what the osu!api reported, so it must never reach a map
+                # this server hosts itself.
                 await app.state.services.database.execute(
-                    "DELETE FROM maps WHERE md5 IN :map_md5s",
+                    "DELETE FROM maps WHERE md5 IN :map_md5s AND server = 'osu!'",
                     {"map_md5s": map_md5s_to_delete},
                 )
 
@@ -649,7 +686,7 @@ class BeatmapSet:
                 "VALUES (:id, :server, :last_osuapi_check)",
                 {
                     "id": self.id,
-                    "server": "osu!",
+                    "server": self.server,
                     "last_osuapi_check": self.last_osuapi_check,
                 },
             )
@@ -663,12 +700,16 @@ class BeatmapSet:
             # TODO: a couple of open questions here:
             # - should we delete the beatmap from the database if it's not in the osu!api?
             # - are 404 and 200 the only cases where we should delete the beatmap?
-            if self.maps:
-                map_md5s_to_delete = {bmap.md5 for bmap in self.maps}
+            # only osu!-hosted maps: a privately-hosted one is not on the osu!api
+            # by design, so its absence from the response says nothing about it.
+            map_md5s_to_delete = {
+                bmap.md5 for bmap in self.maps if bmap.server == MapServer.OSU
+            }
 
+            if map_md5s_to_delete:
                 # delete maps
                 await app.state.services.database.execute(
-                    "DELETE FROM maps WHERE md5 IN :map_md5s",
+                    "DELETE FROM maps WHERE md5 IN :map_md5s AND server = 'osu!'",
                     {"map_md5s": map_md5s_to_delete},
                 )
 
@@ -680,12 +721,18 @@ class BeatmapSet:
 
             # delete set
             await app.state.services.database.execute(
-                "DELETE FROM mapsets WHERE id = :set_id",
+                "DELETE FROM mapsets WHERE id = :set_id AND server = 'osu!'",
                 {"set_id": self.id},
             )
 
     async def _save_to_sql(self) -> None:
-        """Save the object's attributes into the database."""
+        """Save the object's attributes into the database.
+
+        NOTE: `server` is written from the map, never as a literal. `maps.id` and
+        `maps.md5` are *independently* unique, so a `REPLACE` carrying either
+        value deletes whatever row already holds it -- writing a hardcoded
+        `'osu!'` here would silently convert a privately-hosted map.
+        """
         await app.state.services.database.execute_many(
             "REPLACE INTO maps ("
             "md5, id, server, set_id, "
@@ -706,7 +753,7 @@ class BeatmapSet:
                 {
                     "md5": bmap.md5,
                     "id": bmap.id,
-                    "server": "osu!",
+                    "server": bmap.server,
                     "set_id": bmap.set_id,
                     "artist": bmap.artist,
                     "title": bmap.title,
@@ -740,16 +787,21 @@ class BeatmapSet:
     @classmethod
     async def _from_bsid_sql(cls, bsid: int) -> BeatmapSet | None:
         """Fetch a mapset from the database by set id."""
-        last_osuapi_check = await app.state.services.database.fetch_val(
-            "SELECT last_osuapi_check FROM mapsets WHERE id = :set_id",
+        mapset_row = await app.state.services.database.fetch_one(
+            "SELECT server, last_osuapi_check FROM mapsets WHERE id = :set_id",
             {"set_id": bsid},
-            column=0,  # last_osuapi_check
         )
 
-        if last_osuapi_check is None:
+        if mapset_row is None:
             return None
 
-        bmap_set = cls(id=bsid, last_osuapi_check=last_osuapi_check)
+        # the database is the only thing that knows a set is privately hosted;
+        # carrying it onto the object is what lets the refresh path skip it.
+        bmap_set = cls(
+            id=bsid,
+            last_osuapi_check=mapset_row["last_osuapi_check"],
+            server=str(mapset_row["server"]),
+        )
         maps = get_legacy_repositories().maps
 
         for row in await maps.fetch_many(set_id=bsid):
@@ -777,6 +829,7 @@ class BeatmapSet:
                 diff=row.diff,
                 filename=row.filename,
                 map_set=bmap_set,
+                server=str(row.server),
             )
 
             # XXX: tempfix for bancho.py <v3.4.1,
@@ -811,7 +864,8 @@ class BeatmapSet:
             # select all current beatmaps
             # that're frozen in the db
             res = await app.state.services.database.fetch_all(
-                "SELECT id, status FROM maps WHERE set_id = :set_id AND frozen = 1",
+                "SELECT id, status FROM maps "
+                "WHERE set_id = :set_id AND frozen = 1 AND server = 'osu!'",
                 {"set_id": bsid},
             )
 
@@ -834,6 +888,8 @@ class BeatmapSet:
                 # (some implementation-specific stuff not given by api)
                 bmap.passes = 0
                 bmap.plays = 0
+                # `__new__` bypasses `__init__`; this map came from the osu!api.
+                bmap.server = MapServer.OSU
 
                 bmap.set = self
                 self.maps.append(bmap)
@@ -844,7 +900,7 @@ class BeatmapSet:
                 "VALUES (:id, :server, :last_osuapi_check)",
                 {
                     "id": self.id,
-                    "server": "osu!",
+                    "server": self.server,
                     "last_osuapi_check": self.last_osuapi_check,
                 },
             )
