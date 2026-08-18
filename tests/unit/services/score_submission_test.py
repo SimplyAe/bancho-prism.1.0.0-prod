@@ -2309,3 +2309,82 @@ def test_apply_weighted_performance_stats_calculates_accuracy_and_pp() -> None:
     assert stats.pp == 148
     assert updates["acc"] == pytest.approx(96.5384615385)
     assert updates["pp"] == 148
+
+
+# --- status calculation when the .osu file is unavailable -------------------
+#
+# `pp`, `sr` and `status` are bare annotations on `Score` with no defaults, so
+# before these were assigned up front an unavailable .osu left them unset and
+# the caller's `score.status` read raised AttributeError -- discarding a score
+# the player had actually earned. A score we cannot rate is recorded at 0pp.
+
+
+async def test_status_calculation_survives_an_unavailable_osu_file() -> None:
+    score = _score()
+    del score.pp  # prove nothing is inherited from the fixture
+    del score.status
+    score.passed = True
+
+    await score_submission.calculate_score_submission_status(
+        score,
+        score_time=1_000,
+        fail_time=0,
+        ensure_osu_file_is_available=_FakeOsuFileAvailability(available=False),
+    )
+
+    assert score.pp == 0.0
+    assert score.sr == 0.0
+    # SUBMITTED, never BEST: an unrated score must not displace a real best.
+    assert score.status is SubmissionStatus.SUBMITTED
+    assert score.time_elapsed == 1_000
+
+
+async def test_failed_score_with_an_unavailable_osu_file_is_marked_failed() -> None:
+    score = _score()
+    del score.pp
+    del score.status
+    score.passed = False
+
+    await score_submission.calculate_score_submission_status(
+        score,
+        score_time=1_000,
+        fail_time=250,
+        ensure_osu_file_is_available=_FakeOsuFileAvailability(available=False),
+    )
+
+    assert score.pp == 0.0
+    assert score.status is SubmissionStatus.FAILED
+    assert score.time_elapsed == 250
+
+
+async def test_status_calculation_still_rates_an_available_osu_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # regression pin: the defaults must not shadow a real calculation.
+    score = _score()
+    score.passed = True
+
+    def calculate_performance(self: Score, beatmap_id: int) -> tuple[float, float]:
+        return 123.4, 5.6
+
+    async def calculate_status(self: Score) -> None:
+        self.status = SubmissionStatus.BEST
+
+    async def calculate_placement(self: Score) -> int:
+        return 3
+
+    monkeypatch.setattr(Score, "calculate_performance", calculate_performance)
+    monkeypatch.setattr(Score, "calculate_status", calculate_status)
+    monkeypatch.setattr(Score, "calculate_placement", calculate_placement)
+
+    await score_submission.calculate_score_submission_status(
+        score,
+        score_time=2_000,
+        fail_time=0,
+        ensure_osu_file_is_available=_FakeOsuFileAvailability(available=True),
+    )
+
+    assert score.pp == 123.4
+    assert score.sr == 5.6
+    assert score.status is SubmissionStatus.BEST
+    assert score.rank == 3

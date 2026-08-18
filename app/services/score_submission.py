@@ -347,6 +347,18 @@ async def calculate_score_submission_status(
     # now we can calculate things based on our data.
     score.acc = score.calculate_accuracy()
 
+    # `pp`, `sr` and `status` are bare annotations on `Score` -- they have no
+    # defaults. Leaving any of them unset makes the caller's `score.status` read
+    # raise AttributeError, which throws away a score the player actually earned.
+    # So assign them up front; the rated path below overwrites all three.
+    # SUBMITTED (not BEST) is deliberate: a score we could not rate must never
+    # displace a real personal best.
+    score.pp = 0.0
+    score.sr = 0.0
+    score.status = (
+        SubmissionStatus.SUBMITTED if score.passed else SubmissionStatus.FAILED
+    )
+
     osu_file_available = await ensure_osu_file_is_available(
         score.bmap.id,
         expected_md5=score.bmap.md5,
