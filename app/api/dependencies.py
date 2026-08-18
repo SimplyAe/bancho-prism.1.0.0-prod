@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+import os
 import random
 import secrets
+from collections.abc import Sequence
 from datetime import date
 from datetime import datetime
 from datetime import timezone
@@ -14,11 +17,13 @@ import httpx
 from fastapi import Depends
 
 import app.packets
+import app.state.cache
 import app.state.services
 import app.state.sessions
 import app.utils
 from app import settings
 from app import state
+from app.adapters.osz_archive import OszLimits
 from app.bg_task_supervision import spawn_background_task
 from app.discord import Embed
 from app.discord import Webhook
@@ -38,7 +43,10 @@ from app.repositories.ingame_logins import IngameLoginsRepository
 from app.repositories.leaderboard_ranks import LeaderboardRanksRepository
 from app.repositories.logs import LogsRepository
 from app.repositories.mail import MailRepository
+from app.repositories.map_id_sequence import MapIdSequenceRepository
+from app.repositories.map_submissions import MapSubmissionsRepository
 from app.repositories.maps import MapsRepository
+from app.repositories.mapsets import MapsetsRepository
 from app.repositories.mp_matches import MpMatchesRepository
 from app.repositories.ratings import RatingsRepository
 from app.repositories.relationships import RelationshipsRepository
@@ -62,6 +70,7 @@ from app.services.avatars import AvatarsService
 from app.services.bancho import BanchoAuthenticationService
 from app.services.bancho import BanchoLoginService
 from app.services.beatmap_leaderboards import BeatmapLeaderboardService
+from app.services.beatmap_submissions import BeatmapSubmissionService
 from app.services.captcha import CaptchaService
 from app.services.clans import ClansService
 from app.services.client_integrity import ClientIntegrityService
@@ -80,6 +89,7 @@ from app.services.multiplayer.match_history_reader import MatchHistoryService
 from app.services.performance import PerformanceService
 from app.services.player_leaderboards import PlayerLeaderboardsService
 from app.services.players import PlayersService
+from app.services.private_beatmap_files import PrivateBeatmapFilesService
 from app.services.relationships import RelationshipsService
 from app.services.replays import ReplayService
 from app.services.score_leaderboards import ScoreLeaderboardsService
@@ -98,6 +108,59 @@ from app.services.web_sessions import WebSessionsService
 AVATARS_PATH = Path.cwd() / ".data/avatars"
 SCREENSHOTS_PATH = Path.cwd() / ".data/ss"
 REPLAYS_PATH = Path.cwd() / ".data/osr"
+BEATMAPS_PATH = Path.cwd() / ".data/osu"
+BEATMAP_ARCHIVES_PATH = Path.cwd() / ".data/osz"
+
+
+def _write_file_atomically_blocking(path: Path, data: bytes) -> None:
+    """Write ``data`` to ``path`` so a reader never sees a partial file.
+
+    Temp file in the same directory (so the rename stays on one filesystem),
+    fsync, then ``os.replace`` -- which is atomic. A hosted beatmap is read by the
+    osu! client and hashed by score submission, so a half-written ``.osu`` would
+    read as a *different*, wrong beatmap rather than as an obvious failure.
+    """
+    temp_path = path.with_name(f"{path.name}.tmp")
+    with temp_path.open("wb") as temp_file:
+        temp_file.write(data)
+        temp_file.flush()
+        os.fsync(temp_file.fileno())
+    os.replace(temp_path, path)
+
+
+async def _write_file_atomically(path: Path, data: bytes) -> None:
+    # off the event loop: an .osz can be tens of megabytes, and blocking here
+    # would stall every other request on this worker.
+    await asyncio.to_thread(_write_file_atomically_blocking, path, data)
+
+
+def _remove_file(path: Path) -> None:
+    # missing_ok: this runs both as rollback cleanup (where a file may never have
+    # been written) and as teardown, and neither case is an error.
+    path.unlink(missing_ok=True)
+
+
+def _evict_beatmap_cache(
+    *,
+    set_id: int,
+    map_ids: Sequence[int],
+    map_md5s: Sequence[str],
+) -> None:
+    """Drop cached ``Beatmap``/``BeatmapSet`` objects for a set.
+
+    The cache holds live objects whose ``.status`` the leaderboard and score
+    submission read, so after a ranked-status change a stale entry would keep
+    serving the old status until the process restarted.
+    """
+    app.state.cache.beatmapset.pop(set_id, None)
+    for map_id in map_ids:
+        app.state.cache.beatmap.pop(map_id, None)
+    for map_md5 in map_md5s:
+        app.state.cache.beatmap.pop(map_md5, None)
+
+
+def _utc_now() -> datetime:
+    return datetime.now()
 
 
 async def _fetch_mirror_search(
@@ -284,6 +347,18 @@ def get_favourites_repository() -> FavouritesRepository:
 
 def get_ingame_logins_repository() -> IngameLoginsRepository:
     return IngameLoginsRepository(app.state.services.database)
+
+
+def get_map_id_sequence_repository() -> MapIdSequenceRepository:
+    return MapIdSequenceRepository(app.state.services.database)
+
+
+def get_map_submissions_repository() -> MapSubmissionsRepository:
+    return MapSubmissionsRepository(app.state.services.database)
+
+
+def get_mapsets_repository() -> MapsetsRepository:
+    return MapsetsRepository(app.state.services.database)
 
 
 def get_mail_repository() -> MailRepository:
@@ -773,6 +848,63 @@ def get_discord_linking_service(
         exchange_code=_post_discord_token_exchange,
         fetch_identity=_fetch_discord_identity,
         generate_state=_generate_oauth_state,
+    )
+
+
+def get_beatmap_submission_service(
+    maps: Annotated[MapsRepository, Depends(get_maps_repository)],
+    mapsets: Annotated[MapsetsRepository, Depends(get_mapsets_repository)],
+    submissions: Annotated[
+        MapSubmissionsRepository,
+        Depends(get_map_submissions_repository),
+    ],
+    scores: Annotated[ScoresRepository, Depends(get_scores_repository)],
+    id_sequence: Annotated[
+        MapIdSequenceRepository,
+        Depends(get_map_id_sequence_repository),
+    ],
+) -> BeatmapSubmissionService:
+    megabyte = 1024 * 1024
+    return BeatmapSubmissionService(
+        maps=maps,
+        mapsets=mapsets,
+        submissions=submissions,
+        scores=scores,
+        id_sequence=id_sequence,
+        database=app.state.services.database,
+        beatmaps_path=BEATMAPS_PATH,
+        archives_path=BEATMAP_ARCHIVES_PATH,
+        limits=OszLimits(
+            max_archive_bytes=(settings.BEATMAP_SUBMISSION_MAX_ARCHIVE_MB * megabyte),
+            max_total_uncompressed_bytes=(
+                settings.BEATMAP_SUBMISSION_MAX_UNCOMPRESSED_MB * megabyte
+            ),
+            max_member_count=settings.BEATMAP_SUBMISSION_MAX_MEMBERS,
+            max_compression_ratio=(settings.BEATMAP_SUBMISSION_MAX_COMPRESSION_RATIO),
+            max_osu_file_bytes=(settings.BEATMAP_SUBMISSION_MAX_OSU_FILE_MB * megabyte),
+            max_osu_file_count=settings.BEATMAP_SUBMISSION_MAX_DIFFICULTIES,
+        ),
+        max_submissions_per_user=settings.BEATMAP_SUBMISSION_MAX_PER_USER,
+        write_file=_write_file_atomically,
+        remove_file=_remove_file,
+        calculate_difficulty=PerformanceService().calculate_beatmap_difficulty,
+        evict_beatmap_cache=_evict_beatmap_cache,
+        now=_utc_now,
+    )
+
+
+def get_private_beatmap_files_service(
+    maps: Annotated[MapsRepository, Depends(get_maps_repository)],
+    submissions: Annotated[
+        MapSubmissionsRepository,
+        Depends(get_map_submissions_repository),
+    ],
+) -> PrivateBeatmapFilesService:
+    return PrivateBeatmapFilesService(
+        maps=maps,
+        submissions=submissions,
+        beatmaps_path=BEATMAPS_PATH,
+        archives_path=BEATMAP_ARCHIVES_PATH,
     )
 
 
