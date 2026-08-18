@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -9,6 +10,7 @@ from sqlalchemy import DateTime
 from sqlalchemy import Index
 from sqlalchemy import Integer
 from sqlalchemy import String
+from sqlalchemy import delete
 from sqlalchemy import func
 from sqlalchemy import insert
 from sqlalchemy import or_
@@ -1071,4 +1073,16 @@ class ScoresRepository:
         _score = await self._database.fetch_one(select_stmt)
         return self._deserialize_score(_score) if _score is not None else None
 
-    # TODO: delete
+    async def delete_many_by_map_md5s(self, map_md5s: Sequence[str]) -> int:
+        """Delete every score on the given beatmaps. Returns the rows removed.
+
+        Used when a hosted beatmap is taken down: its scores reference it by md5
+        and would otherwise linger, appearing on profiles and in stat totals for a
+        map that no longer exists.
+        """
+        if not map_md5s:
+            # an empty `IN ()` is a syntax error, and "delete nothing" is a no-op.
+            return 0
+
+        delete_stmt = delete(ScoresTable).where(ScoresTable.map_md5.in_(map_md5s))
+        return await self._database.execute(delete_stmt)
