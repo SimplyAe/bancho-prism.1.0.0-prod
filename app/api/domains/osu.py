@@ -61,6 +61,7 @@ from app.services.maps import BeatmapInfoService
 from app.services.maps import BeatmapRatingResultCode
 from app.services.maps import BeatmapRatingService
 from app.services.maps import BeatmapSetService
+from app.services.private_beatmap_files import PrivateBeatmapFilesService
 from app.services.replays import ReplayResultCode
 from app.services.replays import ReplayService
 from app.services.score_submission import ScoreSubmissionError
@@ -1113,11 +1114,28 @@ async def get_screenshot(
 @router.get("/d/{map_set_id}")
 async def get_osz(
     map_set_id: str = Path(...),
+    *,
+    private_beatmap_files: Annotated[
+        PrivateBeatmapFilesService,
+        Depends(api_dependencies.get_private_beatmap_files_service),
+    ],
 ) -> Response:
     """Handle a map download request (osu.ppy.sh/d/*)."""
     no_video = map_set_id[-1] == "n"
     if no_video:
         map_set_id = map_set_id[:-1]
+
+    # a set this server hosts itself is not on the mirror, so serve it directly.
+    # Anything else (including a non-numeric id) falls through to the redirect,
+    # so mirrored downloads behave exactly as before.
+    if map_set_id.isdecimal():
+        hosted = await private_beatmap_files.fetch_osz_archive(int(map_set_id))
+        if hosted is not None:
+            return FileResponse(
+                path=hosted.path,
+                media_type="application/x-osu-beatmap-archive",
+                filename=hosted.download_name,
+            )
 
     query_str = f"{map_set_id}?n={int(not no_video)}"
 
@@ -1132,10 +1150,21 @@ async def get_updated_beatmap(
     request: Request,
     map_filename: str,
     host: str = Header(...),
+    *,
+    private_beatmap_files: Annotated[
+        PrivateBeatmapFilesService,
+        Depends(api_dependencies.get_private_beatmap_files_service),
+    ],
 ) -> Response:
     """Send the latest .osu file the server has for a given map."""
     if host == "osu.ppy.sh":
         return Response("bancho.py only supports the -devserver connection method")
+
+    # osu! has never heard of a map we host, so redirecting there would 404 the
+    # client. Serve ours; everything else redirects as before.
+    hosted = await private_beatmap_files.fetch_osu_file(map_filename)
+    if hosted is not None:
+        return FileResponse(path=hosted.path, media_type="text/plain")
 
     return RedirectResponse(
         url=f"https://osu.ppy.sh{request['raw_path'].decode()}",
