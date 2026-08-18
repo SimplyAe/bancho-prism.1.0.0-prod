@@ -128,7 +128,7 @@ create table maps
 	artist varchar(128) charset utf8 not null,
 	title varchar(128) charset utf8 not null,
 	version varchar(128) charset utf8 not null,
-	creator varchar(19) charset utf8 not null,
+	creator varchar(32) charset utf8 not null,
 	filename varchar(256) charset utf8 not null,
 	last_update datetime not null,
 	total_length int not null,
@@ -171,6 +171,42 @@ create table mapsets
 	constraint nmapsets_id_uindex
 		unique (id)
 );
+
+# id allocation for privately-hosted maps and sets (beatmap submission).
+# Seeded far above osu!'s id space so a custom id can never collide with a real
+# beatmap id -- `maps.id`/`maps.md5` are independently unique and the osu!api
+# refresh writes with REPLACE INTO, so a collision destroys a row rather than
+# raising. See the v5.3.9 block in migrations.sql for the full reasoning.
+create table map_id_sequence
+(
+	id int auto_increment
+		primary key,
+	kind enum('map', 'set') not null,
+	allocated_by int not null,
+	allocated_at datetime default current_timestamp not null
+);
+
+# One row per submitted set, holding the moderation state `maps` has no room for.
+create table map_submissions
+(
+	set_id int not null
+		primary key,
+	submitter_user_id int not null,
+	review_state enum('pending', 'approved', 'rejected') default 'pending' not null,
+	declared_creator varchar(64) charset utf8 not null,
+	difficulty_count int not null,
+	osz_size_bytes int not null,
+	osz_sha256 char(64) not null,
+	submitted_at datetime default current_timestamp not null,
+	updated_at datetime default current_timestamp not null,
+	reviewed_by int null,
+	reviewed_at datetime null,
+	review_note varchar(512) charset utf8 null
+);
+create index map_submissions_submitter_user_id_index
+	on map_submissions (submitter_user_id);
+create index map_submissions_review_state_index
+	on map_submissions (review_state);
 
 create table map_requests
 (
@@ -613,6 +649,13 @@ INSERT INTO stats (id, mode) VALUES (1, 8); # ap!std
 # If you want this, simply remove these two lines.
 alter table users auto_increment = 3;
 alter table stats auto_increment = 3;
+
+# privately-hosted beatmap ids start far above osu!'s id space (~5M today) while
+# staying inside signed int32, so a custom id can never collide with a real one.
+# Losing this seed (e.g. restoring a data-only dump) would allocate from 1 and
+# let a REPLACE destroy a real beatmap row, so the repository asserts the floor
+# on every allocation instead of trusting it.
+alter table map_id_sequence auto_increment = 2000000000;
 
 insert into channels (name, topic, read_priv, write_priv, auto_join)
 values ('#osu', 'General discussion.', 1, 2, true),

@@ -192,7 +192,7 @@ def ensure_persistent_volumes_are_available() -> None:
     DATA_PATH.mkdir(exist_ok=True)
 
     # create /.data/... subdirectories
-    for sub_dir in ("avatars", "logs", "osu", "osr", "ss"):
+    for sub_dir in ("avatars", "logs", "osu", "osr", "ss", "osz"):
         subdir = DATA_PATH / sub_dir
         subdir.mkdir(exist_ok=True)
 

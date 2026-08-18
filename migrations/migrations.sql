@@ -786,3 +786,72 @@ create table user_discord_links
 );
 create unique index user_discord_links_discord_id_uindex
 	on user_discord_links (discord_id);
+
+# v5.3.9
+# Prism beatmap submission (Track 4): maps hosted by *this* server rather than
+# mirrored from osu!. The `maps`/`mapsets` schema has always had a `server` enum
+# with a 'private' value, but nothing ever wrote it; these tables are what make
+# it real.
+#
+# `map_id_sequence` allocates ids for privately-hosted maps and sets. It exists
+# as its own table, seeded far above osu!'s id space, for two reasons:
+#
+#   - a custom id must never collide with a real osu! beatmap id. `maps.id` and
+#     `maps.md5` are *independently* unique and the osu!api refresh writes with
+#     REPLACE INTO, so a collision does not raise -- it silently destroys the
+#     other row. Starting at 2e9 puts us ~400x above today's real ids while
+#     staying inside signed int32 (max 2147483647), leaving ~147M ids.
+#   - neither `maps.id` nor `mapsets.id` is auto_increment (maps' primary key is
+#     the composite (server, id)), and hanging a counter off `maps` would tie it
+#     to the millions of mirrored osu! rows -- the counter would sit at ~5M and
+#     hand out an id that a future real beatmap will also use.
+#
+# One row per allocated id, one sequence shared by both kinds: InnoDB never
+# hands the same auto_increment value to two concurrent transactions and never
+# rolls one back, so a failed upload burns an id. Gaps are expected and harmless;
+# reuse would not be.
+#
+# IMPORTANT: the seed below is what keeps the id ranges disjoint. A database
+# restored from a data-only dump loses it and would allocate from 1, so the
+# repository asserts the floor on every allocation rather than trusting it.
+create table map_id_sequence
+(
+	id int auto_increment
+		primary key,
+	kind enum('map', 'set') not null,
+	allocated_by int not null,
+	allocated_at datetime default current_timestamp not null
+);
+alter table map_id_sequence auto_increment = 2000000000;
+
+# One row per submitted *set*, carrying the moderation state the `maps` table has
+# no room for. `review_state` is staff-controlled and gates visibility to other
+# players; a submitter can never set it, and can never move their own map to a
+# pp-awarding status (see app/services/beatmap_submissions.py).
+create table map_submissions
+(
+	set_id int not null
+		primary key,
+	submitter_user_id int not null,
+	review_state enum('pending', 'approved', 'rejected') default 'pending' not null,
+	declared_creator varchar(64) charset utf8 not null,
+	difficulty_count int not null,
+	osz_size_bytes int not null,
+	osz_sha256 char(64) not null,
+	submitted_at datetime default current_timestamp not null,
+	updated_at datetime default current_timestamp not null,
+	reviewed_by int null,
+	reviewed_at datetime null,
+	review_note varchar(512) charset utf8 null
+);
+create index map_submissions_submitter_user_id_index
+	on map_submissions (submitter_user_id);
+create index map_submissions_review_state_index
+	on map_submissions (review_state);
+
+# `users.name` is varchar(32) but `maps.creator` was varchar(19) (sized for
+# osu!'s own username limit). A privately-hosted map's creator is an account on
+# this server, so the column has to hold any local username. Widening a varchar
+# within the 1-byte-length class is metadata-only (ALGORITHM=INSTANT).
+alter table maps modify creator varchar(32) charset utf8 not null;
+

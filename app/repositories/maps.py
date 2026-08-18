@@ -46,7 +46,9 @@ class MapsTable(Base):
     artist = Column(String(128, collation="utf8"), nullable=False)
     title = Column(String(128, collation="utf8"), nullable=False)
     version = Column(String(128, collation="utf8"), nullable=False)
-    creator = Column(String(19, collation="utf8"), nullable=False)
+    # sized to hold any local username (`users.name` is varchar(32)): a
+    # privately-hosted map's creator is an account on this server, not osu!.
+    creator = Column(String(32, collation="utf8"), nullable=False)
     filename = Column(String(256, collation="utf8"), nullable=False)
     last_update = Column(DateTime, nullable=False)
     total_length = Column(Integer, nullable=False)
@@ -454,3 +456,17 @@ class MapsRepository:
         delete_stmt = delete(MapsTable).where(MapsTable.id == id)
         await self._database.execute(delete_stmt)
         return self._deserialize_map(map)
+
+    async def delete_many_by_set_id(self, *, set_id: int, server: str) -> int:
+        """Delete every map in a set, for one server. Returns the rows removed.
+
+        ``server`` is required, not optional. This table holds both maps mirrored
+        from osu! and maps hosted here, a set id is only unique *within* a server,
+        and this is a bulk delete -- so an unscoped call would silently take out
+        the wrong set. Making the caller state which one is the point.
+        """
+        delete_stmt = delete(MapsTable).where(
+            MapsTable.set_id == set_id,
+            MapsTable.server == server,
+        )
+        return await self._database.execute(delete_stmt)
